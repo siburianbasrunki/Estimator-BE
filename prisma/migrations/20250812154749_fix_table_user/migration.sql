@@ -1,0 +1,10 @@
+/*
+  Warnings:
+
+  - You are about to drop the column `roleId` on the `users` table. All the data in the column will be lost.
+
+*/
+-- AlterTable
+ALTER TABLE "users" DROP COLUMN "roleId",
+ADD COLUMN     "phoneNumber" TEXT,
+ADD COLUMN     "role" "Role" NOT NULL DEFAULT 'USER';
