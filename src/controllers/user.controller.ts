@@ -162,3 +162,52 @@ export const deleteUser = async (
     res.status(500).json({ error: "Failed to delete user" });
   }
 };
+export const createUser = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { name, email, role, phoneNumber } = req.body as {
+      name?: string;
+      email?: string;
+      role?: "USER" | "ADMIN";
+      phoneNumber?: string;
+    };
+
+    if (!name || !email) {
+      res.status(400).json({ error: "name and email are required" });
+      return;
+    }
+
+    const data: any = { name, email, role: role ?? "USER", phoneNumber };
+
+    if (req.file) {
+      const img = await uploadToCloudinary(req.file.path, {
+        folder: "user-profiles",
+        format: "webp",
+      });
+      data.imageUrl = img.imageUrl;
+      data.imageId = img.imageId;
+    }
+
+    const user = await userClient.create({
+      data,
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phoneNumber: true,
+        role: true,
+        imageUrl: true,
+        createdAt: true,
+      },
+    });
+
+    res.status(201).json({ message: "User created", data: user });
+  } catch (error: any) {
+    // Unique email
+    if (error?.code === "P2002") {
+      res.status(409).json({ error: "Email already exists" });
+      return;
+    }
+    console.error("Error creating user:", error);
+    res.status(500).json({ error: "Failed to create user" });
+  }
+};

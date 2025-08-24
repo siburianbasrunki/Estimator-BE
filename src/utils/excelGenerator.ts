@@ -1,3 +1,4 @@
+// src/utils/excelGenerator.ts
 import ExcelJS from "exceljs";
 import dayjs from "dayjs";
 import {
@@ -9,6 +10,10 @@ import {
   VolumeDetail as VD,
   HSPItem,
   HSPCategory,
+  AHSPRecipe,
+  AHSPComponent,
+  MasterItem,
+  AHSPComponentGroup,
 } from "@prisma/client";
 import { calcTotals } from "./exportHelpers";
 
@@ -20,6 +25,11 @@ type EstimationDetailWithMore = ItemDetail & {
   hspItem?:
     | (HSPItem & {
         category: HSPCategory;
+        ahsp?:
+          | (AHSPRecipe & {
+              components: (AHSPComponent & { masterItem: MasterItem })[];
+            })
+          | null;
       })
     | null;
 };
@@ -39,7 +49,7 @@ const COLORS = {
   lightBlue: "FFE0F2FE",
   zebra: "FFF8FAFC",
   white: "FFFFFFFF",
-  black: "FF000000", // teks & border hitam
+  black: "FF000000",
   border: "FF000000",
 };
 
@@ -108,6 +118,20 @@ const roman = (n: number) => {
   return r;
 };
 
+// Safe number helper
+const N = (v: any, def = 0) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+};
+
+// Label group komponen AHSP
+const GROUP_LABEL: Record<AHSPComponentGroup, string> = {
+  LABOR: "A • Labor",
+  MATERIAL: "B • Material",
+  EQUIPMENT: "C • Equipment",
+  OTHER: "Other",
+};
+
 /** =========================
  *   SHEETS
  *  ========================= */
@@ -171,7 +195,6 @@ function addSheetKategoriDipakai(
 
   if (rows.length) ws.addRows(rows);
 
-  // Border + zebra untuk data
   const dataStart = 2;
   for (let r = dataStart; r < dataStart + rows.length; r++) {
     const row = ws.getRow(r);
@@ -345,6 +368,286 @@ function addSheetVolume(wb: ExcelJS.Workbook, est: EstimationWithRelations) {
   }
 }
 
+/** AHSP Dipakai — breakdown komponen per HSP yang benar-benar digunakan */
+function addSheetAHSPDipakai(
+  wb: ExcelJS.Workbook,
+  est: EstimationWithRelations
+) {
+  const ws = wb.addWorksheet("AHSP Dipakai", {
+    views: [{ state: "frozen", ySplit: 1 }],
+    pageSetup: {
+      orientation: "landscape",
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+    },
+    properties: { defaultRowHeight: 18 },
+  });
+
+  ws.columns = [
+    { header: "Kode HSP", key: "kode", width: 18 },
+    { header: "Deskripsi HSP", key: "desk", width: 48 },
+    { header: "Satuan HSP", key: "sat", width: 12 },
+    { header: "Group", key: "grp", width: 16 },
+    { header: "Kode Master", key: "mcode", width: 18 },
+    { header: "Nama Komponen", key: "mname", width: 40 },
+    { header: "Satuan", key: "munit", width: 12 },
+    { header: "Koef.", key: "coef", width: 10 },
+    {
+      header: "Harga Satuan",
+      key: "uprice",
+      width: 18,
+      style: { numFmt: NUMFMT_IDR, alignment: { horizontal: "right" } },
+    },
+    {
+      header: "Subtotal",
+      key: "subtotal",
+      width: 18,
+      style: { numFmt: NUMFMT_IDR, alignment: { horizontal: "right" } },
+    },
+  ];
+
+  const header = ws.getRow(1);
+  header.values = ws.columns.map((c) => (c.header ?? "") as string);
+  header.eachCell((c) => {
+    c.font = FONT.header as any;
+    c.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    c.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: COLORS.headerBlue },
+    };
+    c.border = BORDER_THIN as any;
+  });
+
+  type Row = (string | number)[];
+  const rows: Row[] = [];
+
+  for (const sec of est.items) {
+    for (const d of sec.details) {
+      const h = d.hspItem;
+      if (!h || !h.ahsp) continue;
+
+      const kode = h.kode || "";
+      const desk = h.deskripsi || d.deskripsi || "-";
+      const satuanHsp = h.satuan || d.satuan || "-";
+      const recipe = h.ahsp;
+
+      for (const c of recipe.components || []) {
+        const grp = GROUP_LABEL[c.group] || c.group;
+        const m = c.masterItem;
+        const eff = N(c.effectiveUnitPrice ?? c.priceOverride ?? m?.price, 0);
+        const sub = N(c.subtotal, N(c.coefficient, 1) * eff);
+
+        rows.push([
+          kode,
+          desk,
+          satuanHsp,
+          grp,
+          m?.code || "",
+          c.nameSnapshot || m?.name || "",
+          c.unitSnapshot || m?.unit || "",
+          N(c.coefficient, 1),
+          eff,
+          sub,
+        ]);
+      }
+
+      // Ringkasan recipe (opsional)
+      if (
+        recipe.subtotalABC != null ||
+        recipe.overheadAmount != null ||
+        recipe.finalUnitPrice != null
+      ) {
+        rows.push([
+          kode,
+          desk,
+          satuanHsp,
+          "—",
+          "",
+          "Subtotal ABC (D)",
+          "",
+          "",
+          "",
+          N(recipe.subtotalABC, 0),
+        ]);
+        rows.push([
+          kode,
+          desk,
+          satuanHsp,
+          "—",
+          "",
+          `Overhead ${N(recipe.overheadPercent, 10)}% (E)`,
+          "",
+          "",
+          "",
+          N(recipe.overheadAmount, 0),
+        ]);
+        rows.push([
+          kode,
+          desk,
+          satuanHsp,
+          "—",
+          "",
+          "Harga Akhir (F = D + E)",
+          "",
+          "",
+          "",
+          N(recipe.finalUnitPrice, 0),
+        ]);
+        // spacer
+        rows.push(["", "", "", "", "", "", "", "", "", ""]);
+      }
+    }
+  }
+
+  if (rows.length) ws.addRows(rows);
+
+  const dataStart = 2;
+  for (let r = dataStart; r < dataStart + rows.length; r++) {
+    const row = ws.getRow(r);
+    row.eachCell((c, ci) => {
+      c.border = BORDER_THIN as any;
+      if ([8, 9, 10].includes(ci)) c.alignment = { horizontal: "right" };
+      if ([2, 6].includes(ci)) c.alignment = { wrapText: true };
+    });
+    if ((r - dataStart) % 2 === 1) {
+      row.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: COLORS.zebra },
+      };
+    }
+  }
+}
+
+/** Master Item Dipakai — agregasi unik master item yang muncul di AHSP */
+function addSheetMasterItemDipakai(
+  wb: ExcelJS.Workbook,
+  est: EstimationWithRelations
+) {
+  const ws = wb.addWorksheet("Master Item Dipakai", {
+    views: [{ state: "frozen", ySplit: 1 }],
+    pageSetup: {
+      orientation: "landscape",
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+    },
+    properties: { defaultRowHeight: 18 },
+  });
+
+  ws.columns = [
+    { header: "Kode", key: "code", width: 18 },
+    { header: "Nama", key: "name", width: 40 },
+    { header: "Satuan", key: "unit", width: 12 },
+    { header: "Tipe", key: "type", width: 16 },
+    {
+      header: "Harga (Master)",
+      key: "price",
+      width: 18,
+      style: { numFmt: NUMFMT_IDR, alignment: { horizontal: "right" } },
+    },
+    { header: "Dipakai di HSP (unik)", key: "usedIn", width: 18 },
+    {
+      header: "Total Subtotal di AHSP",
+      key: "sum",
+      width: 22,
+      style: { numFmt: NUMFMT_IDR, alignment: { horizontal: "right" } },
+    },
+    { header: "Catatan", key: "notes", width: 28 },
+  ];
+
+  const header = ws.getRow(1);
+  header.values = ws.columns.map((c) => (c.header ?? "") as string);
+  header.eachCell((c) => {
+    c.font = FONT.header as any;
+    c.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    c.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: COLORS.headerBlue },
+    };
+    c.border = BORDER_THIN as any;
+  });
+
+  type Agg = {
+    code: string;
+    name: string;
+    unit: string;
+    type: string;
+    price: number;
+    usedHsp: Set<string>;
+    sumSubtotal: number;
+    notes?: string | null;
+  };
+  const agg = new Map<string, Agg>();
+
+  for (const sec of est.items) {
+    for (const d of sec.details) {
+      const h = d.hspItem;
+      if (!h || !h.ahsp) continue;
+      const hspCode = h.kode || "";
+
+      for (const c of h.ahsp.components || []) {
+        const m = c.masterItem;
+        if (!m) continue;
+        const id = m.id;
+        const eff = N(c.effectiveUnitPrice ?? c.priceOverride ?? m.price, 0);
+        const sub = N(c.subtotal, N(c.coefficient, 1) * eff);
+
+        if (!agg.has(id)) {
+          agg.set(id, {
+            code: m.code,
+            name: c.nameSnapshot || m.name,
+            unit: c.unitSnapshot || m.unit,
+            type: String(m.type),
+            price: N(m.price, 0),
+            usedHsp: new Set<string>(),
+            sumSubtotal: 0,
+            notes: m.notes ?? undefined,
+          });
+        }
+        const a = agg.get(id)!;
+        a.usedHsp.add(hspCode);
+        a.sumSubtotal += sub;
+      }
+    }
+  }
+
+  const rows = [...agg.values()]
+    .sort((a, b) => a.code.localeCompare(b.code))
+    .map((a) => [
+      a.code,
+      a.name,
+      a.unit,
+      a.type,
+      a.price,
+      a.usedHsp.size,
+      a.sumSubtotal,
+      a.notes || "",
+    ]);
+
+  if (rows.length) ws.addRows(rows);
+
+  const dataStart = 2;
+  for (let r = dataStart; r < dataStart + rows.length; r++) {
+    const row = ws.getRow(r);
+    row.eachCell((c, ci) => {
+      c.border = BORDER_THIN as any;
+      if ([5, 7].includes(ci)) c.alignment = { horizontal: "right" };
+      if ([2, 8].includes(ci)) c.alignment = { wrapText: true };
+    });
+    if ((r - dataStart) % 2 === 1) {
+      row.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: COLORS.zebra },
+      };
+    }
+  }
+}
+
 /** =========================
  *   MAIN: buildEstimationExcel
  *  ========================= */
@@ -506,7 +809,7 @@ export async function buildEstimationExcel(
     }
   });
 
-  /** ========= Sheet 2: RAB (header disesuaikan) ========= */
+  /** ========= Sheet 2: RAB ========= */
   const sRAB = wb.addWorksheet("RAB", {
     views: [{ state: "frozen", ySplit: 6 }],
     pageSetup: {
@@ -670,10 +973,12 @@ export async function buildEstimationExcel(
     currentRow++;
   });
 
-  /** ========= SHEET 3-5 ========= */
+  /** ========= SHEET 3-7 ========= */
   addSheetKategoriDipakai(wb, est);
   addSheetJobItemDipakai(wb, est);
   addSheetVolume(wb, est);
+  addSheetAHSPDipakai(wb, est);
+  addSheetMasterItemDipakai(wb, est);
 
   /** Font default untuk semua sheet */
   wb.worksheets.forEach((sh) => {

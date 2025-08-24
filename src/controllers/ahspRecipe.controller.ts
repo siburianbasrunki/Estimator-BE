@@ -1,6 +1,6 @@
-// src/controllers/ahspRecipe.controller.ts
 import { Request, Response } from "express";
 import prisma from "../lib/prisma";
+import { scopeOf } from "../lib/_scoping";
 
 const toFloat = (v: any, def = 0) => {
   const n = parseFloat(String(v ?? ""));
@@ -9,11 +9,19 @@ const toFloat = (v: any, def = 0) => {
 const isGroup = (t: any): t is "LABOR" | "MATERIAL" | "EQUIPMENT" | "OTHER" =>
   ["LABOR", "MATERIAL", "EQUIPMENT", "OTHER"].includes(String(t));
 
-/** GET detail by kode (sudah kamu punya di hsp.controller: getHsdDetailByKode) */
-
-/** PATCH overhead by kode (create recipe kalau belum ada) */
-export const updateAhspOverheadByKode = async (req: Request, res: Response) => {
+/** PATCH overhead by kode (copy-on-write) */
+export const updateAhspOverheadByKode = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
+    const userId = (req as any).user?.id as string | undefined;
+    if (!userId) {
+      res.status(401).json({ status: "error", error: "Unauthorized" });
+      return;
+    }
+    const userScope = scopeOf(userId);
+
     const kode = decodeURIComponent((req.params.kode || "").trim());
     const n = toFloat(req.body.overheadPercent, NaN);
     if (!Number.isFinite(n) || n < 0) {
@@ -22,55 +30,121 @@ export const updateAhspOverheadByKode = async (req: Request, res: Response) => {
         .json({ status: "error", error: "overheadPercent must be >= 0" });
       return;
     }
-    const item = await prisma.hSPItem.findUnique({ where: { kode } });
-    if (!item) {
-      res.status(404).json({ status: "error", error: "HSP item not found" });
-      return;
+
+    let userItem = await prisma.hSPItem
+      .findUnique({
+        where: { scope_kode_unique: { scope: userScope, kode } },
+        include: { ahsp: { include: { components: true } } },
+      })
+      .catch(() => null);
+
+    if (!userItem) {
+      const base = await prisma.hSPItem.findUnique({
+        where: { scope_kode_unique: { scope: "GLOBAL", kode } },
+        include: { ahsp: { include: { components: true } } },
+      });
+      if (!base) {
+        res.status(404).json({ status: "error", error: "HSP item not found" });
+        return;
+      }
+
+      userItem = await prisma.hSPItem.create({
+        data: {
+          scope: userScope,
+          kode: base.kode,
+          deskripsi: base.deskripsi,
+          satuan: base.satuan,
+          harga: base.harga,
+          hspCategoryId: base.hspCategoryId,
+        },
+      });
+
+      if (base.ahsp) {
+        const newRecipe = await prisma.aHSPRecipe.create({
+          data: {
+            scope: userScope,
+            hspItemId: userItem.id,
+            overheadPercent: base.ahsp.overheadPercent,
+            subtotalABC: base.ahsp.subtotalABC,
+            overheadAmount: base.ahsp.overheadAmount,
+            finalUnitPrice: base.ahsp.finalUnitPrice,
+            notes: base.ahsp.notes,
+          },
+        });
+        for (const c of base.ahsp.components) {
+          await prisma.aHSPComponent.create({
+            data: {
+              scope: userScope,
+              ahspId: newRecipe.id,
+              group: c.group,
+              masterItemId: c.masterItemId,
+              nameSnapshot: c.nameSnapshot,
+              unitSnapshot: c.unitSnapshot,
+              unitPriceSnapshot: c.unitPriceSnapshot,
+              coefficient: c.coefficient,
+              priceOverride: c.priceOverride,
+              effectiveUnitPrice: c.effectiveUnitPrice,
+              subtotal: c.subtotal,
+              order: c.order,
+              notes: c.notes,
+            },
+          });
+        }
+      }
     }
 
     let recipe = await prisma.aHSPRecipe.findUnique({
-      where: { hspItemId: item.id },
+      where: { hspItemId: userItem.id },
     });
-    if (!recipe) {
-      recipe = await prisma.aHSPRecipe.create({
-        data: { hspItemId: item.id, overheadPercent: n },
-      });
-    } else {
-      recipe = await prisma.aHSPRecipe.update({
-        where: { id: recipe.id },
-        data: { overheadPercent: n },
-      });
-    }
-    res
-      .status(200)
-      .json({
-        status: "success",
-        data: { id: recipe.id, overheadPercent: recipe.overheadPercent },
-      });
+    recipe = recipe
+      ? await prisma.aHSPRecipe.update({
+          where: { id: recipe.id },
+          data: { overheadPercent: n },
+        })
+      : await prisma.aHSPRecipe.create({
+          data: {
+            scope: userScope,
+            hspItemId: userItem.id,
+            overheadPercent: n,
+          },
+        });
+
+    res.status(200).json({
+      status: "success",
+      data: { id: recipe.id, overheadPercent: recipe.overheadPercent },
+    });
+    return;
   } catch (e: any) {
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to update overhead",
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to update overhead",
+      detail: e?.message,
+    });
+    return;
   }
 };
 
-/** POST add component by kode (create recipe if missing) */
-export const addAhspComponentByKode = async (req: Request, res: Response) => {
+/** POST add component by kode (copy-on-write jika perlu) */
+export const addAhspComponentByKode = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
+    const userId = (req as any).user?.id as string | undefined;
+    if (!userId) {
+      res.status(401).json({ status: "error", error: "Unauthorized" });
+      return;
+    }
+    const userScope = scopeOf(userId);
+
     const kode = decodeURIComponent((req.params.kode || "").trim());
     const { group, masterItemId, coefficient, priceOverride, notes } =
       req.body || {};
     if (!isGroup(group)) {
-      res
-        .status(400)
-        .json({
-          status: "error",
-          error: "group must be LABOR|MATERIAL|EQUIPMENT|OTHER",
-        });
+      res.status(400).json({
+        status: "error",
+        error: "group must be LABOR|MATERIAL|EQUIPMENT|OTHER",
+      });
       return;
     }
     if (!masterItemId) {
@@ -79,19 +153,77 @@ export const addAhspComponentByKode = async (req: Request, res: Response) => {
         .json({ status: "error", error: "masterItemId is required" });
       return;
     }
-    const item = await prisma.hSPItem.findUnique({ where: { kode } });
-    if (!item) {
-      res.status(404).json({ status: "error", error: "HSP item not found" });
-      return;
+
+    let userItem = await prisma.hSPItem
+      .findUnique({
+        where: { scope_kode_unique: { scope: userScope, kode } },
+        include: { ahsp: { include: { components: true } } },
+      })
+      .catch(() => null);
+
+    if (!userItem) {
+      const base = await prisma.hSPItem.findUnique({
+        where: { scope_kode_unique: { scope: "GLOBAL", kode } },
+        include: { ahsp: { include: { components: true } } },
+      });
+      if (!base) {
+        res.status(404).json({ status: "error", error: "HSP item not found" });
+        return;
+      }
+
+      userItem = await prisma.hSPItem.create({
+        data: {
+          scope: userScope,
+          kode: base.kode,
+          deskripsi: base.deskripsi,
+          satuan: base.satuan,
+          harga: base.harga,
+          hspCategoryId: base.hspCategoryId,
+        },
+      });
+
+      if (base.ahsp) {
+        const newRecipe = await prisma.aHSPRecipe.create({
+          data: {
+            scope: userScope,
+            hspItemId: userItem.id,
+            overheadPercent: base.ahsp.overheadPercent,
+            subtotalABC: base.ahsp.subtotalABC,
+            overheadAmount: base.ahsp.overheadAmount,
+            finalUnitPrice: base.ahsp.finalUnitPrice,
+            notes: base.ahsp.notes,
+          },
+        });
+        for (const c of base.ahsp.components) {
+          await prisma.aHSPComponent.create({
+            data: {
+              scope: userScope,
+              ahspId: newRecipe.id,
+              group: c.group,
+              masterItemId: c.masterItemId,
+              nameSnapshot: c.nameSnapshot,
+              unitSnapshot: c.unitSnapshot,
+              unitPriceSnapshot: c.unitPriceSnapshot,
+              coefficient: c.coefficient,
+              priceOverride: c.priceOverride,
+              effectiveUnitPrice: c.effectiveUnitPrice,
+              subtotal: c.subtotal,
+              order: c.order,
+              notes: c.notes,
+            },
+          });
+        }
+      }
     }
 
     let recipe = await prisma.aHSPRecipe.findUnique({
-      where: { hspItemId: item.id },
+      where: { hspItemId: userItem.id },
     });
-    if (!recipe)
+    if (!recipe) {
       recipe = await prisma.aHSPRecipe.create({
-        data: { hspItemId: item.id, overheadPercent: 10 },
+        data: { scope: userScope, hspItemId: userItem.id, overheadPercent: 10 },
       });
+    }
 
     const master = await prisma.masterItem.findUnique({
       where: { id: masterItemId },
@@ -124,6 +256,7 @@ export const addAhspComponentByKode = async (req: Request, res: Response) => {
 
     const created = await prisma.aHSPComponent.create({
       data: {
+        scope: userScope,
         ahspId: recipe.id,
         group,
         masterItemId: master.id,
@@ -141,25 +274,29 @@ export const addAhspComponentByKode = async (req: Request, res: Response) => {
     });
 
     res.status(201).json({ status: "success", data: created });
+    return;
   } catch (e: any) {
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to add component",
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to add component",
+      detail: e?.message,
+    });
+    return;
   }
 };
 
-/** PATCH update component (coef/override/notes/order) */
-export const updateAhspComponent = async (req: Request, res: Response) => {
+export const updateAhspComponent = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
     const { id } = req.params;
+
     const comp = await prisma.aHSPComponent.findUnique({
       where: { id },
       include: { masterItem: true },
     });
+
     if (!comp) {
       res.status(404).json({ status: "error", error: "Component not found" });
       return;
@@ -181,12 +318,10 @@ export const updateAhspComponent = async (req: Request, res: Response) => {
       else {
         const p = toFloat(req.body.priceOverride, NaN);
         if (!Number.isFinite(p) || p < 0) {
-          res
-            .status(400)
-            .json({
-              status: "error",
-              error: "priceOverride must be >= 0 or null",
-            });
+          res.status(400).json({
+            status: "error",
+            error: "priceOverride must be >= 0 or null",
+          });
           return;
         }
         payload.priceOverride = p;
@@ -197,53 +332,57 @@ export const updateAhspComponent = async (req: Request, res: Response) => {
     if (req.body.order !== undefined)
       payload.order = parseInt(String(req.body.order ?? 0), 10) || 0;
 
-    // recompute derived
     const coef = payload.coefficient ?? comp.coefficient ?? 1;
-    const basePrice =
+    const base =
       (payload.priceOverride === undefined
         ? comp.priceOverride
         : payload.priceOverride) ?? comp.masterItem.price;
-    payload.effectiveUnitPrice = basePrice;
-    payload.subtotal = coef * basePrice;
+    payload.effectiveUnitPrice = base;
+    payload.subtotal = coef * base;
 
     const updated = await prisma.aHSPComponent.update({
       where: { id },
       data: payload,
       include: { masterItem: true },
     });
+
     res.status(200).json({ status: "success", data: updated });
+    return;
   } catch (e: any) {
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to update component",
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to update component",
+      detail: e?.message,
+    });
+    return;
   }
 };
 
-/** DELETE component */
-export const deleteAhspComponent = async (req: Request, res: Response) => {
+export const deleteAhspComponent = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
     const { id } = req.params;
     await prisma.aHSPComponent.delete({ where: { id } });
     res.status(200).json({ status: "success", data: { id, deleted: true } });
+    return;
   } catch (e: any) {
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to delete component",
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to delete component",
+      detail: e?.message,
+    });
+    return;
   }
 };
 
-/** POST recompute item -> simpan subtotalABC/overhead/final + update HSPItem.harga */
-export const recomputeHspItem = async (req: Request, res: Response) => {
+export const recomputeHspItem = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
-    const { id } = req.params; // HSPItem.id
+    const { id } = req.params;
     const recipe = await prisma.aHSPRecipe.findUnique({
       where: { hspItemId: id },
       include: { components: { include: { masterItem: true } }, hspItem: true },
@@ -288,19 +427,17 @@ export const recomputeHspItem = async (req: Request, res: Response) => {
       }),
     ]);
 
-    res
-      .status(200)
-      .json({
-        status: "success",
-        data: { subtotalABC: D, overheadAmount: E, finalUnitPrice: F },
-      });
+    res.status(200).json({
+      status: "success",
+      data: { subtotalABC: D, overheadAmount: E, finalUnitPrice: F },
+    });
+    return;
   } catch (e: any) {
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to recompute",
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to recompute",
+      detail: e?.message,
+    });
+    return;
   }
 };

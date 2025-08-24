@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import prisma from "../lib/prisma";
+import { scopeOf, mergeUserOverGlobal } from "../lib/_scoping";
 
 /* Helpers */
 const toInt = (v: any, def = 0) => {
@@ -17,43 +18,65 @@ const GROUP_LABEL: Record<GroupKey, "A" | "B" | "C" | "X"> = {
   OTHER: "X",
 };
 
-export const listCategories = async (req: Request, res: Response) => {
+/** =========================
+ *  CATEGORIES (scoped read)
+ *  ========================= */
+export const listCategories = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
+    const userId = (req as any).user?.id as string | undefined;
+    const userScope = scopeOf(userId);
+
     const q = (req.query.q as string) || "";
     const skip = Math.max(0, toInt(req.query.skip, 0));
     const take = clamp(toInt(req.query.take, 20), 1, 200);
 
-    const where = q
-      ? { name: { contains: q, mode: "insensitive" as const } }
-      : {};
+    const whereBase: any = {};
+    if (q) whereBase.name = { contains: q, mode: "insensitive" as const };
 
-    const [total, data] = await Promise.all([
-      prisma.hSPCategory.count({ where }),
+    const [rowsUser, rowsGlobal] = await Promise.all([
       prisma.hSPCategory.findMany({
-        where,
+        where: { ...whereBase, scope: userScope },
         orderBy: { name: "asc" },
-        skip,
-        take,
+        include: { _count: { select: { items: true } } },
+      }),
+      prisma.hSPCategory.findMany({
+        where: { ...whereBase, scope: "GLOBAL" },
+        orderBy: { name: "asc" },
         include: { _count: { select: { items: true } } },
       }),
     ]);
 
-    res.status(200).json({
-      status: "success",
-      data,
-      pagination: { skip, take, total },
-    });
+    const merged = mergeUserOverGlobal(rowsUser, rowsGlobal, (r) => r.name);
+    const total = merged.length;
+    const data = merged.slice(skip, skip + take);
+
+    res
+      .status(200)
+      .json({ status: "success", data, pagination: { skip, take, total } });
+    return;
   } catch (e: any) {
-    res.status(500).json({
-      status: "error",
-      error: "Failed to fetch categories",
-      detail: e?.message,
-    });
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to fetch categories",
+        detail: e?.message,
+      });
+    return;
   }
 };
 
-export const getCategoryWithItems = async (req: Request, res: Response) => {
+export const getCategoryWithItems = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
+    const userId = (req as any).user?.id as string | undefined;
+    const userScope = scopeOf(userId);
+
     const { id } = req.params;
     const q = (req.query.q as string) || "";
     const skip = Math.max(0, toInt(req.query.skip, 0));
@@ -61,37 +84,37 @@ export const getCategoryWithItems = async (req: Request, res: Response) => {
     const orderByField = (req.query.orderBy as string) || "kode";
     const orderDir = (req.query.orderDir as string) === "desc" ? "desc" : "asc";
 
-    const itemWhere = q
-      ? {
-          OR: [
-            { kode: { contains: q, mode: "insensitive" as const } },
-            { deskripsi: { contains: q, mode: "insensitive" as const } },
-          ],
-        }
-      : {};
-
-    const category = await prisma.hSPCategory.findUnique({
+    const cat = await prisma.hSPCategory.findFirst({
       where: { id },
-      select: { id: true, name: true },
+      select: { id: true, name: true, scope: true },
     });
-
-    if (!category) {
+    if (!cat) {
       res.status(404).json({ status: "error", error: "Category not found" });
       return;
     }
 
-    const [totalItems, items] = await Promise.all([
-      prisma.hSPItem.count({
-        where: { hspCategoryId: id, ...(itemWhere as any) },
+    const itemWhere: any = { isDeleted: false, hspCategoryId: cat.id };
+    if (q) {
+      itemWhere.OR = [
+        { kode: { contains: q, mode: "insensitive" as const } },
+        { deskripsi: { contains: q, mode: "insensitive" as const } },
+      ];
+    }
+
+    const [itemsUser, itemsGlobal] = await Promise.all([
+      prisma.hSPItem.findMany({
+        where: { ...itemWhere, scope: userScope },
+        select: {
+          id: true,
+          kode: true,
+          deskripsi: true,
+          satuan: true,
+          harga: true,
+          hspCategoryId: true,
+        },
       }),
       prisma.hSPItem.findMany({
-        where: { hspCategoryId: id, ...(itemWhere as any) },
-        orderBy:
-          orderByField === "harga"
-            ? { harga: orderDir as "asc" | "desc" }
-            : { kode: orderDir as "asc" | "desc" },
-        skip,
-        take,
+        where: { ...itemWhere, scope: "GLOBAL" },
         select: {
           id: true,
           kode: true,
@@ -103,22 +126,45 @@ export const getCategoryWithItems = async (req: Request, res: Response) => {
       }),
     ]);
 
-    res.status(200).json({
-      status: "success",
-      data: { ...category, items },
-      pagination: { skip, take, total: totalItems },
+    let items = mergeUserOverGlobal(itemsUser, itemsGlobal, (r) => r.kode);
+
+    items.sort((a, b) => {
+      const dir = orderDir === "desc" ? -1 : 1;
+      if (orderByField === "harga") return (a.harga - b.harga) * dir;
+      return a.kode.localeCompare(b.kode) * dir;
     });
+
+    const totalItems = items.length;
+    items = items.slice(skip, skip + take);
+
+    res
+      .status(200)
+      .json({
+        status: "success",
+        data: { id: cat.id, name: cat.name, items },
+        pagination: { skip, take, total: totalItems },
+      });
+    return;
   } catch (e: any) {
-    res.status(500).json({
-      status: "error",
-      error: "Failed to fetch category",
-      detail: e?.message,
-    });
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to fetch category",
+        detail: e?.message,
+      });
+    return;
   }
 };
 
-export const listItems = async (req: Request, res: Response) => {
+/** =========================
+ *  ITEMS LIST + GROUPED
+ *  ========================= */
+export const listItems = async (req: Request, res: Response): Promise<void> => {
   try {
+    const userId = (req as any).user?.id as string | undefined;
+    const userScope = scopeOf(userId);
+
     const categoryId = (req.query.categoryId as string) || undefined;
     const kodeExact = (req.query.kode as string) || undefined;
     const q = (req.query.q as string) || "";
@@ -127,26 +173,31 @@ export const listItems = async (req: Request, res: Response) => {
     const orderByField = (req.query.orderBy as string) || "kode";
     const orderDir = (req.query.orderDir as string) === "desc" ? "desc" : "asc";
 
-    const where: any = {};
-    if (categoryId) where.hspCategoryId = categoryId;
-    if (kodeExact) where.kode = kodeExact;
+    const whereBase: any = { isDeleted: false };
+    if (categoryId) whereBase.hspCategoryId = categoryId;
+    if (kodeExact) whereBase.kode = kodeExact;
     if (q) {
-      where.OR = [
+      whereBase.OR = [
         { kode: { contains: q, mode: "insensitive" } },
         { deskripsi: { contains: q, mode: "insensitive" } },
       ];
     }
 
-    const [total, data] = await Promise.all([
-      prisma.hSPItem.count({ where }),
+    const [rowsUser, rowsGlobal] = await Promise.all([
       prisma.hSPItem.findMany({
-        where,
-        orderBy:
-          orderByField === "harga"
-            ? { harga: orderDir as "asc" | "desc" }
-            : { kode: orderDir as "asc" | "desc" },
-        skip,
-        take,
+        where: { ...whereBase, scope: userScope },
+        select: {
+          id: true,
+          kode: true,
+          deskripsi: true,
+          satuan: true,
+          harga: true,
+          hspCategoryId: true,
+          category: { select: { id: true, name: true } },
+        },
+      }),
+      prisma.hSPItem.findMany({
+        where: { ...whereBase, scope: "GLOBAL" },
         select: {
           id: true,
           kode: true,
@@ -159,22 +210,41 @@ export const listItems = async (req: Request, res: Response) => {
       }),
     ]);
 
-    res.status(200).json({
-      status: "success",
-      data,
-      pagination: { skip, take, total },
+    let data = mergeUserOverGlobal(rowsUser, rowsGlobal, (r) => r.kode);
+
+    data.sort((a, b) => {
+      const dir = orderDir === "desc" ? -1 : 1;
+      if (orderByField === "harga") return (a.harga - b.harga) * dir;
+      return a.kode.localeCompare(b.kode) * dir;
     });
+
+    const total = data.length;
+    data = data.slice(skip, skip + take);
+
+    res
+      .status(200)
+      .json({ status: "success", data, pagination: { skip, take, total } });
+    return;
   } catch (e: any) {
-    res.status(500).json({
-      status: "error",
-      error: "Failed to fetch items",
-      detail: e?.message,
-    });
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to fetch items",
+        detail: e?.message,
+      });
+    return;
   }
 };
 
-export const listAllGrouped = async (req: Request, res: Response) => {
+export const listAllGrouped = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
+    const userId = (req as any).user?.id as string | undefined;
+    const userScope = scopeOf(userId);
+
     const q = (req.query.q as string) || "";
     const limitParam = toInt(req.query.limitPerCategory, 1000);
     const takePerCat = limitParam > 0 ? limitParam : undefined;
@@ -184,62 +254,69 @@ export const listAllGrouped = async (req: Request, res: Response) => {
     const itemOrderDir =
       (req.query.itemOrderDir as string) === "desc" ? "desc" : "asc";
 
-    const itemWhere = q
-      ? {
-          OR: [
-            { kode: { contains: q, mode: "insensitive" as const } },
-            { deskripsi: { contains: q, mode: "insensitive" as const } },
-            { satuan: { contains: q, mode: "insensitive" as const } },
-          ],
-        }
-      : {};
+    const catWhere: any = {};
+    if (q) catWhere.name = { contains: q, mode: "insensitive" as const };
 
-    const categoryWhere = q
-      ? {
-          OR: [
-            { name: { contains: q, mode: "insensitive" as const } },
-            { items: { some: itemWhere as any } },
-          ],
-        }
-      : {};
+    const [catsUser, catsGlobal] = await Promise.all([
+      prisma.hSPCategory.findMany({
+        where: { ...catWhere, scope: userScope },
+        orderBy: { name: "asc" },
+      }),
+      prisma.hSPCategory.findMany({
+        where: { ...catWhere, scope: "GLOBAL" },
+        orderBy: { name: "asc" },
+      }),
+    ]);
 
-    const categories = await prisma.hSPCategory.findMany({
-      where: categoryWhere as any,
-      orderBy: { name: "asc" },
-      include: {
-        items: {
-          where: itemWhere as any,
-          orderBy:
-            itemOrderBy === "harga"
-              ? { harga: itemOrderDir as "asc" | "desc" }
-              : { kode: itemOrderDir as "asc" | "desc" },
-          take: takePerCat, // undefined => no limit
-          select: { kode: true, deskripsi: true, satuan: true, harga: true },
-        },
-      },
-    });
+    const categories = mergeUserOverGlobal(catsUser, catsGlobal, (c) => c.name);
 
-    const grouped: Record<
+    const result: Record<
       string,
       Array<{ kode: string; deskripsi: string; satuan: string; harga: number }>
     > = {};
     let totalItems = 0;
+
     for (const cat of categories) {
-      if (!includeEmpty && cat.items.length === 0) continue;
-      grouped[cat.name] = cat.items.map((it) => ({
-        kode: it.kode,
-        deskripsi: it.deskripsi,
-        satuan: it.satuan,
-        harga: it.harga,
-      }));
-      totalItems += cat.items.length;
+      const whereItems: any = { isDeleted: false, hspCategoryId: cat.id };
+      if (q) {
+        whereItems.OR = [
+          { kode: { contains: q, mode: "insensitive" as const } },
+          { deskripsi: { contains: q, mode: "insensitive" as const } },
+          { satuan: { contains: q, mode: "insensitive" as const } },
+        ];
+      }
+
+      const [iu, ig] = await Promise.all([
+        prisma.hSPItem.findMany({
+          where: { ...whereItems, scope: userScope },
+          select: { kode: true, deskripsi: true, satuan: true, harga: true },
+        }),
+        prisma.hSPItem.findMany({
+          where: { ...whereItems, scope: "GLOBAL" },
+          select: { kode: true, deskripsi: true, satuan: true, harga: true },
+        }),
+      ]);
+
+      let merged = mergeUserOverGlobal(iu, ig, (r) => r.kode);
+
+      merged.sort((a, b) => {
+        const dir = itemOrderDir === "desc" ? -1 : 1;
+        if (itemOrderBy === "harga") return (a.harga - b.harga) * dir;
+        return a.kode.localeCompare(b.kode) * dir;
+      });
+
+      if (typeof takePerCat === "number") merged = merged.slice(0, takePerCat);
+
+      if (!includeEmpty && merged.length === 0) continue;
+      result[cat.name] = merged;
+      totalItems += merged.length;
     }
 
     res.status(200).json({
       status: "success",
-      data: grouped,
+      data: result,
       meta: {
-        categories: Object.keys(grouped).length,
+        categories: Object.keys(result).length,
         items: totalItems,
         params: {
           q,
@@ -250,25 +327,38 @@ export const listAllGrouped = async (req: Request, res: Response) => {
         },
       },
     });
+    return;
   } catch (e: any) {
-    res.status(500).json({
-      status: "error",
-      error: "Failed to fetch categories with items",
-      detail: e?.message,
-    });
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to fetch categories with items",
+        detail: e?.message,
+      });
+    return;
   }
 };
 
-export const getHsdDetail = async (req: Request, res: Response) => {
+/** =========================
+ *  DETAIL HSD / AHSP
+ *  ========================= */
+export const getHsdDetail = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
+    const userId = (req as any).user?.id as string | undefined;
+    const userScope = scopeOf(userId);
+
     const { id } = req.params;
     const useSnapshot =
       String(req.query.useSnapshot || "false").toLowerCase() === "true";
     const includeMaster =
       String(req.query.includeMaster || "true").toLowerCase() !== "false";
 
-    const item = await prisma.hSPItem.findUnique({
-      where: { id },
+    const base = await prisma.hSPItem.findFirst({
+      where: { id, isDeleted: false },
       include: {
         category: { select: { id: true, name: true } },
         ahsp: {
@@ -294,16 +384,46 @@ export const getHsdDetail = async (req: Request, res: Response) => {
         },
       },
     });
-
-    if (!item) {
+    if (!base) {
       res.status(404).json({ status: "error", error: "HSP item not found" });
       return;
     }
 
-    // Jika belum ada recipe, tetap kembalikan informasi HSP-nya
-    const recipe = item.ahsp;
+    let item = base;
+    if (base.scope === "GLOBAL") {
+      const override = await prisma.hSPItem
+        .findUnique({
+          where: { scope_kode_unique: { scope: userScope, kode: base.kode } },
+          include: {
+            category: { select: { id: true, name: true } },
+            ahsp: {
+              include: {
+                components: {
+                  include: includeMaster
+                    ? {
+                        masterItem: {
+                          select: {
+                            id: true,
+                            code: true,
+                            name: true,
+                            unit: true,
+                            price: true,
+                            type: true,
+                          },
+                        },
+                      }
+                    : undefined,
+                  orderBy: [{ group: "asc" }, { order: "asc" }],
+                },
+              },
+            },
+          },
+        })
+        .catch(() => null);
+      if (override && !override.isDeleted) item = override;
+    }
 
-    // Kelompok & hitung subtotal (A/B/C/Other)
+    const recipe = item.ahsp;
     const groups: Record<GroupKey, any> = {
       LABOR: {
         key: "LABOR",
@@ -334,10 +454,6 @@ export const getHsdDetail = async (req: Request, res: Response) => {
     if (recipe) {
       for (const comp of recipe.components) {
         const g = comp.group as GroupKey;
-
-        // Basis harga:
-        // - jika useSnapshot: pakai snapshot terlebih dulu
-        // - jika tidak: pakai priceOverride -> masterItem.price -> snapshot
         const basePrice = useSnapshot
           ? (comp.priceOverride ??
             comp.unitPriceSnapshot ??
@@ -357,20 +473,13 @@ export const getHsdDetail = async (req: Request, res: Response) => {
           order: comp.order,
           group: comp.group,
           masterItemId: comp.masterItemId,
-          // master (opsional)
           masterItem: includeMaster ? comp.masterItem : undefined,
-
-          // snapshot
           nameSnapshot: comp.nameSnapshot,
           unitSnapshot: comp.unitSnapshot,
           unitPriceSnapshot: comp.unitPriceSnapshot,
-
-          // editable
           coefficient: comp.coefficient,
           priceOverride: comp.priceOverride,
           notes: comp.notes,
-
-          // computed (on the fly)
           effectiveUnitPrice,
           subtotal,
         });
@@ -385,33 +494,24 @@ export const getHsdDetail = async (req: Request, res: Response) => {
     const E = D * (overheadPercent / 100);
     const F = D + E;
 
-    // Response payload
     const payload = {
       id: item.id,
+      scope: item.scope,
       kode: item.kode,
       deskripsi: item.deskripsi,
       satuan: item.satuan,
       category: item.category,
-      harga: item.harga, // harga tersimpan (cache)
+      harga: item.harga,
       recipe: recipe
         ? {
             id: recipe.id,
             overheadPercent,
-            // nilai tersimpan (jika ada)
             stored: {
               subtotalABC: recipe.subtotalABC,
               overheadAmount: recipe.overheadAmount,
               finalUnitPrice: recipe.finalUnitPrice,
             },
-            // nilai terhitung saat ini
-            computed: {
-              A,
-              B,
-              C,
-              D,
-              E,
-              F,
-            },
+            computed: { A, B, C, D, E, F },
             groups,
             notes: recipe.notes,
             updatedAt: recipe.updatedAt,
@@ -420,120 +520,27 @@ export const getHsdDetail = async (req: Request, res: Response) => {
     };
 
     res.status(200).json({ status: "success", data: payload });
+    return;
   } catch (e: any) {
-    res.status(500).json({
-      status: "error",
-      error: "Failed to fetch HSD detail",
-      detail: e?.message,
-    });
-  }
-};
-
-/**
- * Utility: daftar master item per type
- * Query:
- *  q?=string (search code/name/unit)
- *  skip?=0  take?=20 (1..200)
- *  orderBy?=code|name|price  orderDir?=asc|desc
- */
-const listMasterByType = async (
-  req: Request,
-  res: Response,
-  type: GroupKey
-) => {
-  try {
-    const q = (req.query.q as string) || "";
-    const skip = Math.max(0, toInt(req.query.skip, 0));
-    const take = clamp(toInt(req.query.take, 20), 1, 200);
-    const orderByField = (req.query.orderBy as string) || "code";
-    const orderDir = (req.query.orderDir as string) === "desc" ? "desc" : "asc";
-
-    const where: any = { type };
-    if (q) {
-      where.OR = [
-        { code: { contains: q, mode: "insensitive" } },
-        { name: { contains: q, mode: "insensitive" } },
-        { unit: { contains: q, mode: "insensitive" } },
-      ];
-    }
-
-    const orderBy =
-      orderByField === "price"
-        ? { price: orderDir as "asc" | "desc" }
-        : orderByField === "name"
-          ? { name: orderDir as "asc" | "desc" }
-          : { code: orderDir as "asc" | "desc" };
-
-    const [total, data] = await Promise.all([
-      prisma.masterItem.count({ where }),
-      prisma.masterItem.findMany({
-        where,
-        orderBy,
-        skip,
-        take,
-        select: {
-          id: true,
-          code: true,
-          name: true,
-          unit: true,
-          price: true,
-          type: true,
-          hourlyRate: true,
-          dailyRate: true,
-          notes: true,
-          updatedAt: true,
-        },
-      }),
-    ]);
-
-    res.status(200).json({
-      status: "success",
-      data,
-      pagination: { skip, take, total },
-      meta: { type },
-    });
-  } catch (e: any) {
-    res.status(500).json({
-      status: "error",
-      error: `Failed to fetch master items (${type})`,
-      detail: e?.message,
-    });
-  }
-};
-
-export const listMasterLabor = (req: Request, res: Response) =>
-  listMasterByType(req, res, "LABOR");
-export const listMasterMaterials = (req: Request, res: Response) =>
-  listMasterByType(req, res, "MATERIAL");
-export const listMasterEquipments = (req: Request, res: Response) =>
-  listMasterByType(req, res, "EQUIPMENT");
-export const listMasterOthers = (req: Request, res: Response) =>
-  listMasterByType(req, res, "OTHER");
-
-/**
- * Versi generic:
- * GET /master
- *   ?type=LABOR|MATERIAL|EQUIPMENT|OTHER
- *   ?q=&skip=&take=&orderBy=&orderDir=
- */
-export const listMasterGeneric = async (req: Request, res: Response) => {
-  const raw = (req.query.type as string) || "";
-  const type = ["LABOR", "MATERIAL", "EQUIPMENT", "OTHER"].includes(raw)
-    ? (raw as GroupKey)
-    : undefined;
-  if (!type) {
-    res.status(400).json({
-      status: "error",
-      error:
-        "Query parameter 'type' is required (LABOR|MATERIAL|EQUIPMENT|OTHER)",
-    });
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to fetch HSD detail",
+        detail: e?.message,
+      });
     return;
   }
-  return listMasterByType(req, res, type);
 };
 
-export const getHsdDetailByKode = async (req: Request, res: Response) => {
+export const getHsdDetailByKode = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
+    const userId = (req as any).user?.id as string | undefined;
+    const userScope = scopeOf(userId);
+
     const rawKode = decodeURIComponent((req.params.kode || "").trim());
     if (!rawKode) {
       res
@@ -547,38 +554,39 @@ export const getHsdDetailByKode = async (req: Request, res: Response) => {
     const includeMaster =
       String(req.query.includeMaster || "true").toLowerCase() !== "false";
 
-    // Cari by KODE (unik). Fallback case-insensitive kalau exact tidak ketemu.
-    let item = await prisma.hSPItem.findUnique({
-      where: { kode: rawKode },
-      include: {
-        category: { select: { id: true, name: true } },
-        ahsp: {
-          include: {
-            components: {
-              include: includeMaster
-                ? {
-                    masterItem: {
-                      select: {
-                        id: true,
-                        code: true,
-                        name: true,
-                        unit: true,
-                        price: true,
-                        type: true,
+    let item = await prisma.hSPItem
+      .findUnique({
+        where: { scope_kode_unique: { scope: userScope, kode: rawKode } },
+        include: {
+          category: { select: { id: true, name: true } },
+          ahsp: {
+            include: {
+              components: {
+                include: includeMaster
+                  ? {
+                      masterItem: {
+                        select: {
+                          id: true,
+                          code: true,
+                          name: true,
+                          unit: true,
+                          price: true,
+                          type: true,
+                        },
                       },
-                    },
-                  }
-                : undefined,
-              orderBy: [{ group: "asc" }, { order: "asc" }],
+                    }
+                  : undefined,
+                orderBy: [{ group: "asc" }, { order: "asc" }],
+              },
             },
           },
         },
-      },
-    });
+      })
+      .catch(() => null);
 
-    if (!item) {
-      item = await prisma.hSPItem.findFirst({
-        where: { kode: { equals: rawKode, mode: "insensitive" } },
+    if (!item || item.isDeleted) {
+      item = await prisma.hSPItem.findUnique({
+        where: { scope_kode_unique: { scope: "GLOBAL", kode: rawKode } },
         include: {
           category: { select: { id: true, name: true } },
           ahsp: {
@@ -606,20 +614,12 @@ export const getHsdDetailByKode = async (req: Request, res: Response) => {
       });
     }
 
-    if (!item) {
+    if (!item || item.isDeleted) {
       res
         .status(404)
         .json({ status: "error", error: "HSP item not found by kode" });
       return;
     }
-
-    type GroupKey = "LABOR" | "MATERIAL" | "EQUIPMENT" | "OTHER";
-    const GROUP_LABEL: Record<GroupKey, "A" | "B" | "C" | "X"> = {
-      LABOR: "A",
-      MATERIAL: "B",
-      EQUIPMENT: "C",
-      OTHER: "X",
-    };
 
     const groups: Record<GroupKey, any> = {
       LABOR: {
@@ -694,6 +694,7 @@ export const getHsdDetailByKode = async (req: Request, res: Response) => {
 
     const payload = {
       id: item.id,
+      scope: item.scope,
       kode: item.kode,
       deskripsi: item.deskripsi,
       satuan: item.satuan,
@@ -717,11 +718,440 @@ export const getHsdDetailByKode = async (req: Request, res: Response) => {
     };
 
     res.status(200).json({ status: "success", data: payload });
+    return;
   } catch (e: any) {
-    res.status(500).json({
-      status: "error",
-      error: "Failed to fetch HSD detail by kode",
-      detail: e?.message,
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to fetch HSD detail by kode",
+        detail: e?.message,
+      });
+    return;
+  }
+};
+
+/** =========================
+ *  CRUD: CATEGORIES (scoped)
+ *  ========================= */
+export const createHspCategory = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = (req as any).user?.id as string | undefined;
+    const scope = scopeOf(userId);
+
+    const name = String(req.body?.name || "").trim();
+    if (!name) {
+      res.status(400).json({ status: "error", error: "Name is required" });
+      return;
+    }
+
+    const cat = await prisma.hSPCategory.create({ data: { scope, name } });
+    res.status(201).json({ status: "success", data: cat });
+    return;
+  } catch (e: any) {
+    if (e?.code === "P2002") {
+      res
+        .status(409)
+        .json({
+          status: "error",
+          error: "Category name already exists in your scope",
+        });
+      return;
+    }
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to create category",
+        detail: e?.message,
+      });
+    return;
+  }
+};
+
+export const updateHspCategory = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const name = String(req.body?.name || "").trim();
+    if (!name) {
+      res.status(400).json({ status: "error", error: "Name is required" });
+      return;
+    }
+
+    const updated = await prisma.hSPCategory.update({
+      where: { id },
+      data: { name },
     });
+    res.status(200).json({ status: "success", data: updated });
+    return;
+  } catch (e: any) {
+    if (e?.code === "P2025") {
+      res.status(404).json({ status: "error", error: "Category not found" });
+      return;
+    }
+    if (e?.code === "P2002") {
+      res
+        .status(409)
+        .json({ status: "error", error: "Category name already exists" });
+      return;
+    }
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to update category",
+        detail: e?.message,
+      });
+    return;
+  }
+};
+
+export const deleteHspCategory = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const { id } = req.params;
+    await prisma.hSPCategory.delete({ where: { id } });
+    res.status(200).json({ status: "success", message: "Category deleted" });
+    return;
+  } catch (e: any) {
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to delete category",
+        detail: e?.message,
+      });
+    return;
+  }
+};
+
+/** =========================
+ *  CRUD: HSP ITEMS (scoped)
+ *  ========================= */
+export const createHspItem = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = (req as any).user?.id as string | undefined;
+    const scope = scopeOf(userId);
+
+    const { hspCategoryId, kode, deskripsi, satuan } = req.body || {};
+    if (!hspCategoryId || !kode || !deskripsi) {
+      res
+        .status(400)
+        .json({
+          status: "error",
+          error: "hspCategoryId, kode, deskripsi are required",
+        });
+      return;
+    }
+
+    const created = await prisma.hSPItem.create({
+      data: {
+        scope,
+        hspCategoryId,
+        kode: String(kode).trim(),
+        deskripsi: String(deskripsi).trim(),
+        satuan: String(satuan || "").trim(),
+        harga: 0,
+      },
+      select: {
+        id: true,
+        scope: true,
+        kode: true,
+        deskripsi: true,
+        satuan: true,
+        harga: true,
+        hspCategoryId: true,
+      },
+    });
+
+    res.status(201).json({ status: "success", data: created });
+    return;
+  } catch (e: any) {
+    if (e?.code === "P2002") {
+      res
+        .status(409)
+        .json({ status: "error", error: "Kode already exists in your scope" });
+      return;
+    }
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to create item",
+        detail: e?.message,
+      });
+    return;
+  }
+};
+
+// Admin-like direct update by id
+export const updateHspItem = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const payload: {
+      hspCategoryId?: string;
+      kode?: string;
+      deskripsi?: string;
+      satuan?: string;
+    } = {};
+    if (typeof req.body?.hspCategoryId === "string")
+      payload.hspCategoryId = req.body.hspCategoryId;
+    if (typeof req.body?.kode === "string") payload.kode = req.body.kode.trim();
+    if (typeof req.body?.deskripsi === "string")
+      payload.deskripsi = req.body.deskripsi.trim();
+    if (typeof req.body?.satuan === "string")
+      payload.satuan = req.body.satuan.trim();
+
+    const updated = await prisma.hSPItem.update({
+      where: { id },
+      data: payload,
+      select: {
+        id: true,
+        scope: true,
+        kode: true,
+        deskripsi: true,
+        satuan: true,
+        harga: true,
+        hspCategoryId: true,
+      },
+    });
+
+    res.status(200).json({ status: "success", data: updated });
+    return;
+  } catch (e: any) {
+    if (e?.code === "P2025") {
+      res.status(404).json({ status: "error", error: "Item not found" });
+      return;
+    }
+    if (e?.code === "P2002") {
+      res
+        .status(409)
+        .json({
+          status: "error",
+          error: "Kode already exists in target scope",
+        });
+      return;
+    }
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to update item",
+        detail: e?.message,
+      });
+    return;
+  }
+};
+
+export const deleteHspItem = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const { id } = req.params;
+    await prisma.hSPItem.delete({ where: { id } });
+    res.status(200).json({ status: "success", message: "Item deleted" });
+    return;
+  } catch (e: any) {
+    if (e?.code === "P2025") {
+      res.status(404).json({ status: "error", error: "Item not found" });
+      return;
+    }
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to delete item",
+        detail: e?.message,
+      });
+    return;
+  }
+};
+
+/**
+ * User-facing: PATCH /hsp/items/by-kode/:kode (copy-on-write)
+ */
+export const updateHspItemByKode = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = (req as any).user?.id as string | undefined;
+    if (!userId) {
+      res.status(401).json({ status: "error", error: "Unauthorized" });
+      return;
+    }
+
+    const userScope = scopeOf(userId);
+    const kode = decodeURIComponent(String(req.params.kode || "").trim());
+    if (!kode) {
+      res.status(400).json({ status: "error", error: "Missing kode" });
+      return;
+    }
+
+    const payload: {
+      hspCategoryId?: string;
+      kode?: string;
+      deskripsi?: string;
+      satuan?: string;
+    } = {};
+    if (typeof req.body?.hspCategoryId === "string")
+      payload.hspCategoryId = req.body.hspCategoryId;
+    if (typeof req.body?.kode === "string") payload.kode = req.body.kode.trim();
+    if (typeof req.body?.deskripsi === "string")
+      payload.deskripsi = req.body.deskripsi.trim();
+    if (typeof req.body?.satuan === "string")
+      payload.satuan = req.body.satuan.trim();
+
+    let userItem = await prisma.hSPItem
+      .findUnique({
+        where: { scope_kode_unique: { scope: userScope, kode } },
+      })
+      .catch(() => null);
+
+    if (!userItem) {
+      const base = await prisma.hSPItem.findUnique({
+        where: { scope_kode_unique: { scope: "GLOBAL", kode } },
+      });
+      if (!base) {
+        res.status(404).json({ status: "error", error: "Item not found" });
+        return;
+      }
+
+      userItem = await prisma.hSPItem.create({
+        data: {
+          scope: userScope,
+          kode: base.kode,
+          deskripsi: base.deskripsi,
+          satuan: base.satuan,
+          harga: base.harga,
+          hspCategoryId: base.hspCategoryId,
+        },
+      });
+    }
+
+    const updated = await prisma.hSPItem.update({
+      where: { id: userItem.id },
+      data: { ...payload, isDeleted: false },
+      select: {
+        id: true,
+        scope: true,
+        kode: true,
+        deskripsi: true,
+        satuan: true,
+        harga: true,
+        hspCategoryId: true,
+      },
+    });
+
+    res.status(200).json({ status: "success", data: updated });
+    return;
+  } catch (e: any) {
+    if (e?.code === "P2002") {
+      res
+        .status(409)
+        .json({ status: "error", error: "Kode already exists in your scope" });
+      return;
+    }
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to update item",
+        detail: e?.message,
+      });
+    return;
+  }
+};
+
+/**
+ * User-facing: DELETE /hsp/items/by-kode/:kode (tombstone)
+ */
+export const deleteHspItemByKode = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = (req as any).user?.id as string | undefined;
+    if (!userId) {
+      res.status(401).json({ status: "error", error: "Unauthorized" });
+      return;
+    }
+
+    const userScope = scopeOf(userId);
+    const kode = decodeURIComponent(String(req.params.kode || "").trim());
+    if (!kode) {
+      res.status(400).json({ status: "error", error: "Missing kode" });
+      return;
+    }
+
+    const userItem = await prisma.hSPItem
+      .findUnique({
+        where: { scope_kode_unique: { scope: userScope, kode } },
+      })
+      .catch(() => null);
+
+    if (userItem) {
+      await prisma.hSPItem.update({
+        where: { id: userItem.id },
+        data: { isDeleted: true },
+      });
+      res
+        .status(200)
+        .json({ status: "success", message: "Item deleted in your scope" });
+      return;
+    }
+
+    const global = await prisma.hSPItem.findUnique({
+      where: { scope_kode_unique: { scope: "GLOBAL", kode } },
+    });
+
+    if (!global) {
+      res.status(404).json({ status: "error", error: "Item not found" });
+      return;
+    }
+
+    await prisma.hSPItem.create({
+      data: {
+        scope: userScope,
+        kode: global.kode,
+        deskripsi: global.deskripsi,
+        satuan: global.satuan,
+        harga: global.harga,
+        hspCategoryId: global.hspCategoryId,
+        isDeleted: true,
+      },
+    });
+
+    res
+      .status(200)
+      .json({
+        status: "success",
+        message: "Item hidden (deleted) for this user",
+      });
+    return;
+  } catch (e: any) {
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to delete item",
+        detail: e?.message,
+      });
+    return;
   }
 };

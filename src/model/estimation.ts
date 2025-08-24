@@ -6,6 +6,7 @@ export type VolumeDetailPayload = {
   tinggi: number;
   jumlah: number;
   volume: number; // FE sudah hitung (p*l*t*jumlah), BE tetap simpan
+  extras?: { name: string; value: number }[];
 };
 export interface EstimationItemData {
   title: string;

@@ -21,6 +21,10 @@ const prisma =
         url: process.env.DATABASE_URL,
       },
     },
+    transactionOptions: {
+      maxWait: 20000,
+      timeout: 20000,
+    },
   });
 
 if (process.env.NODE_ENV !== "production") {

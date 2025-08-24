@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../lib/prisma";
+import { scopeOf } from "../lib/_scoping";
 
-/* Helpers */
 const toFloat = (v: any, def = 0) => {
   const n = parseFloat(String(v ?? ""));
   return Number.isFinite(n) ? n : def;
@@ -14,10 +14,7 @@ const isValidType = (
   ["LABOR", "MATERIAL", "EQUIPMENT", "OTHER"].includes(String(t));
 
 const rand6 = () => Math.random().toString(36).slice(2, 8).toUpperCase();
-const autoCode = (
-  type: "LABOR" | "MATERIAL" | "EQUIPMENT" | "OTHER",
-  name?: string
-) => {
+const autoCode = (type: "LABOR" | "MATERIAL" | "EQUIPMENT" | "OTHER") => {
   const prefix =
     type === "MATERIAL"
       ? "MAT"
@@ -28,24 +25,111 @@ const autoCode = (
           : "LAB";
   return `${prefix}-${rand6()}`;
 };
-/** CREATE
- * POST /hsp/master
- * body: { code, name, unit, price, type, hourlyRate?, dailyRate? }
- */
-export const createMasterItem = async (req: Request, res: Response) => {
+
+/** LIST GENERIC BY TYPE (merge user + global) */
+export const listMasterGeneric = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
+    const userId = (req as any).user?.id as string | undefined;
+    const userScope = scopeOf(userId);
+
+    const raw = (req.query.type as string) || "";
+    const type = ["LABOR", "MATERIAL", "EQUIPMENT", "OTHER"].includes(raw)
+      ? (raw as any)
+      : undefined;
+    if (!type) {
+      res
+        .status(400)
+        .json({
+          status: "error",
+          error:
+            "Query parameter 'type' is required (LABOR|MATERIAL|EQUIPMENT|OTHER)",
+        });
+      return;
+    }
+
+    const q = (req.query.q as string) || "";
+    const skip = Math.max(0, parseInt(String(req.query.skip ?? 0), 10) || 0);
+    const take = Math.min(
+      Math.max(1, parseInt(String(req.query.take ?? 20), 10) || 20),
+      200
+    );
+    const orderByField = (req.query.orderBy as string) || "code";
+    const orderDir = (req.query.orderDir as string) === "desc" ? "desc" : "asc";
+
+    const where: any = { type };
+    if (q) {
+      where.OR = [
+        { code: { contains: q, mode: "insensitive" } },
+        { name: { contains: q, mode: "insensitive" } },
+        { unit: { contains: q, mode: "insensitive" } },
+      ];
+    }
+
+    const [rowsUser, rowsGlobal] = await Promise.all([
+      prisma.masterItem.findMany({ where: { ...where, scope: userScope } }),
+      prisma.masterItem.findMany({ where: { ...where, scope: "GLOBAL" } }),
+    ]);
+
+    const map = new Map<string, any>();
+    for (const g of rowsGlobal) map.set(g.code, g);
+    for (const u of rowsUser) map.set(u.code, u);
+    let data = Array.from(map.values());
+
+    data.sort((a, b) => {
+      const dir = orderDir === "desc" ? -1 : 1;
+      if (orderByField === "price") return (a.price - b.price) * dir;
+      if (orderByField === "name") return a.name.localeCompare(b.name) * dir;
+      return a.code.localeCompare(b.code) * dir;
+    });
+
+    const total = data.length;
+    data = data.slice(skip, skip + take);
+
+    res
+      .status(200)
+      .json({
+        status: "success",
+        data,
+        pagination: { skip, take, total },
+        meta: { type },
+      });
+    return;
+  } catch (e: any) {
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: `Failed to fetch master items`,
+        detail: e?.message,
+      });
+    return;
+  }
+};
+
+export const createMasterItem = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = (req as any).user?.id as string | undefined;
+    const scope = scopeOf(userId);
+
     const { code, name, unit, price, type, hourlyRate, dailyRate, notes } =
       req.body;
 
     if (!isStr(name) || !isStr(unit) || !isValidType(type)) {
-      res.status(400).json({
-        status: "error",
-        error: "name, unit, and valid type are required",
-      });
+      res
+        .status(400)
+        .json({
+          status: "error",
+          error: "name, unit, and valid type are required",
+        });
       return;
     }
 
-    // Untuk LABOR: wajib kode. Selain itu: kode boleh kosong → auto generate.
     let finalCode = (code ?? "").trim();
     if (type === "LABOR") {
       if (!isStr(finalCode)) {
@@ -55,11 +139,9 @@ export const createMasterItem = async (req: Request, res: Response) => {
         return;
       }
     } else {
-      if (!isStr(finalCode)) finalCode = autoCode(type, name);
+      if (!isStr(finalCode)) finalCode = autoCode(type);
     }
 
-    // Tentukan price:
-    // LABOR → default ke dailyRate (OH). Fallback ke hourlyRate. Terakhir ke "price" bila keduanya kosong.
     let priceNum = toFloat(price, NaN);
     const hr = hourlyRate !== undefined ? toFloat(hourlyRate, NaN) : NaN;
     const dr = dailyRate !== undefined ? toFloat(dailyRate, NaN) : NaN;
@@ -68,15 +150,18 @@ export const createMasterItem = async (req: Request, res: Response) => {
       else if (Number.isFinite(hr)) priceNum = hr;
     }
     if (!Number.isFinite(priceNum) || priceNum < 0) {
-      res.status(400).json({
-        status: "error",
-        error:
-          "price must be a non-negative number (or provide dailyRate/hourlyRate for LABOR)",
-      });
+      res
+        .status(400)
+        .json({
+          status: "error",
+          error:
+            "price must be a non-negative number (or provide dailyRate/hourlyRate for LABOR)",
+        });
       return;
     }
 
     const data: any = {
+      scope,
       code: norm(finalCode),
       name: norm(name),
       unit: norm(unit),
@@ -84,7 +169,6 @@ export const createMasterItem = async (req: Request, res: Response) => {
       type,
       notes: isStr(notes) ? norm(notes) : null,
     };
-
     if (hourlyRate !== undefined)
       data.hourlyRate = toFloat(hourlyRate, null as any);
     if (dailyRate !== undefined)
@@ -92,27 +176,32 @@ export const createMasterItem = async (req: Request, res: Response) => {
 
     const created = await prisma.masterItem.create({ data });
     res.status(201).json({ status: "success", data: created });
+    return;
   } catch (e: any) {
     if (e?.code === "P2002") {
-      res.status(409).json({
-        status: "error",
-        error: "Duplicate code. 'code' must be unique.",
-      });
+      res
+        .status(409)
+        .json({
+          status: "error",
+          error: "Duplicate code. 'code' must be unique in your scope.",
+        });
       return;
     }
-    res.status(500).json({
-      status: "error",
-      error: "Failed to create master item",
-      detail: e?.message,
-    });
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to create master item",
+        detail: e?.message,
+      });
+    return;
   }
 };
 
-/** DETAIL
- * GET /hsp/master/:id
- * returns master item + _count.components
- */
-export const getMasterItem = async (req: Request, res: Response) => {
+export const getMasterItem = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
     const { id } = req.params;
     const item = await prisma.masterItem.findUnique({
@@ -124,21 +213,23 @@ export const getMasterItem = async (req: Request, res: Response) => {
       return;
     }
     res.status(200).json({ status: "success", data: item });
+    return;
   } catch (e: any) {
-    res.status(500).json({
-      status: "error",
-      error: "Failed to fetch master item",
-      detail: e?.message,
-    });
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to fetch master item",
+        detail: e?.message,
+      });
+    return;
   }
 };
 
-/** UPDATE
- * PATCH /hsp/master/:id?recompute=true|false
- * body: { code?, name?, unit?, price?, type?, hourlyRate?, dailyRate? }
- * Jika query recompute=true, semua recipe (AHSP) yang memakai item ini akan dihitung ulang dan disimpan.
- */
-export const updateMasterItem = async (req: Request, res: Response) => {
+export const updateMasterItem = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
     const { id } = req.params;
     const recompute =
@@ -210,7 +301,6 @@ export const updateMasterItem = async (req: Request, res: Response) => {
     if (req.body.notes !== undefined)
       payload.notes = isStr(req.body.notes) ? norm(req.body.notes) : null;
 
-    // Bila LABOR dan dailyRate dikirim, sinkronkan price ke dailyRate (OH)
     if (
       original.type === "LABOR" &&
       req.body.dailyRate !== undefined &&
@@ -219,7 +309,6 @@ export const updateMasterItem = async (req: Request, res: Response) => {
       const dr = toFloat(req.body.dailyRate, NaN);
       if (Number.isFinite(dr) && dr >= 0) payload.price = dr;
     }
-    // Atau bila daily kosong tapi hourly dikirim (dan price tidak dikirim), fallback price=hourly
     if (
       original.type === "LABOR" &&
       req.body.dailyRate === undefined &&
@@ -234,6 +323,7 @@ export const updateMasterItem = async (req: Request, res: Response) => {
       where: { id },
       data: payload,
     });
+
     if (recompute) await recomputeRecipesUsingMasterItem(id);
 
     res
@@ -243,13 +333,14 @@ export const updateMasterItem = async (req: Request, res: Response) => {
         data: updated,
         meta: { recomputed: recompute },
       });
+    return;
   } catch (e: any) {
     if (e?.code === "P2002") {
       res
         .status(409)
         .json({
           status: "error",
-          error: "Duplicate code. 'code' must be unique.",
+          error: "Duplicate code. 'code' must be unique in its scope.",
         });
       return;
     }
@@ -260,15 +351,14 @@ export const updateMasterItem = async (req: Request, res: Response) => {
         error: "Failed to update master item",
         detail: e?.message,
       });
+    return;
   }
 };
 
-/** DELETE
- * DELETE /hsp/master/:id
- * Akan diblok jika masih dipakai oleh AHSPComponent.
- * Tambahkan ?force=true jika kamu ingin menghapus beserta komponen-komponennya (opsional – disini kita BLOK, tidak force-delete).
- */
-export const deleteMasterItem = async (req: Request, res: Response) => {
+export const deleteMasterItem = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
     const { id } = req.params;
 
@@ -292,20 +382,23 @@ export const deleteMasterItem = async (req: Request, res: Response) => {
 
     await prisma.masterItem.delete({ where: { id } });
     res.status(200).json({ status: "success", data: { id, deleted: true } });
+    return;
   } catch (e: any) {
-    res.status(500).json({
-      status: "error",
-      error: "Failed to delete master item",
-      detail: e?.message,
-    });
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to delete master item",
+        detail: e?.message,
+      });
+    return;
   }
 };
 
 /* ============================
-   Recompute helper (optional)
+   Recompute helper
    ============================ */
 async function recomputeRecipesUsingMasterItem(masterItemId: string) {
-  // Cari semua recipe yang terpengaruh
   const compRefs = await prisma.aHSPComponent.findMany({
     where: { masterItemId },
     select: { ahspId: true },
@@ -328,11 +421,9 @@ async function recomputeRecipesUsingMasterItem(masterItemId: string) {
     let A = 0,
       B = 0,
       C = 0;
-
     const compUpdates: any[] = [];
 
     for (const comp of recipe.components) {
-      // hitung ulang semua komponen supaya konsisten (baik yang override maupun tidak)
       const effectiveUnitPrice = comp.priceOverride ?? comp.masterItem.price;
       const subtotal = (comp.coefficient ?? 1) * effectiveUnitPrice;
 
@@ -343,35 +434,20 @@ async function recomputeRecipesUsingMasterItem(masterItemId: string) {
         })
       );
 
-      switch (comp.group) {
-        case "LABOR":
-          A += subtotal;
-          break;
-        case "MATERIAL":
-          B += subtotal;
-          break;
-        case "EQUIPMENT":
-          C += subtotal;
-          break;
-        default:
-          break;
-      }
+      if (comp.group === "LABOR") A += subtotal;
+      if (comp.group === "MATERIAL") B += subtotal;
+      if (comp.group === "EQUIPMENT") C += subtotal;
     }
 
     const D = A + B + C;
     const E = D * (recipe.overheadPercent / 100);
     const F = D + E;
 
-    // transaction: update components + recipe + hspItem.harga
     await prisma.$transaction([
       ...compUpdates,
       prisma.aHSPRecipe.update({
         where: { id: recipe.id },
-        data: {
-          subtotalABC: D,
-          overheadAmount: E,
-          finalUnitPrice: F,
-        },
+        data: { subtotalABC: D, overheadAmount: E, finalUnitPrice: F },
       }),
       prisma.hSPItem.update({
         where: { id: recipe.hspItem.id },
@@ -380,3 +456,4 @@ async function recomputeRecipesUsingMasterItem(masterItemId: string) {
     ]);
   }
 }
+

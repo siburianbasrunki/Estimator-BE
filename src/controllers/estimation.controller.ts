@@ -1,19 +1,51 @@
+// src/controllers/estimation.controller.ts
 import { Request, Response } from "express";
-import prisma from "../lib/prisma";
+import prisma, { userClient } from "../lib/prisma";
 import { uploadToCloudinary } from "../utils/cloudinaryUpload";
 import { CreateEstimationData } from "../model/estimation";
 import { sanitizeFileName } from "../utils/exportHelpers";
 import { buildEstimationPdf } from "../utils/pdfGenerator";
 import { buildEstimationExcel } from "../utils/excelGenerator";
-
+import { randomUUID } from "crypto";
+import { Prisma } from "@prisma/client";
 export interface AuthenticatedRequest extends Request {
   userId?: string;
   userRole?: string;
 }
+
 const mapJenisToVolumeOp = (jenis: string): "ADD" | "SUB" =>
   jenis?.toLowerCase() === "pengurangan" ? "SUB" : "ADD";
 
-// Create new estimation
+/* =========================================================
+ * CREATE ESTIMATION (optimized with batch createMany)
+ * =======================================================*/
+async function buildHspCodeMap(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  rawCodes: string[]
+) {
+  const codes = Array.from(
+    new Set((rawCodes || []).map((s) => (s || "").trim()).filter(Boolean))
+  );
+  if (!codes.length) return new Map<string, string>();
+
+  const rows = await tx.hSPItem.findMany({
+    where: {
+      kode: { in: codes },
+      isDeleted: false,
+      OR: [{ scope: `u:${userId}` }, { scope: "GLOBAL" }],
+    },
+    select: { id: true, kode: true, scope: true },
+  });
+
+  const m = new Map<string, string>();
+  for (const r of rows) {
+    const prev = m.get(r.kode);
+    // utamakan yang scope user
+    if (!prev || r.scope.startsWith("u:")) m.set(r.kode, r.id);
+  }
+  return m;
+}
 export const createEstimation = async (
   req: AuthenticatedRequest,
   res: Response
@@ -34,7 +66,6 @@ export const createEstimation = async (
       estimationItem,
     }: CreateEstimationData = req.body;
 
-    // Validasi input
     if (!projectName || !owner || ppn === undefined) {
       res.status(400).json({
         error: "Missing required fields: projectName, owner, ppn",
@@ -42,10 +73,10 @@ export const createEstimation = async (
       return;
     }
 
-    // Upload gambar jika ada
     let imageUrl: string | null = null;
     let imageId: string | null = null;
 
+    // Upload gambar DI LUAR transaksi
     if (req.file) {
       const uploadResult = await uploadToCloudinary(req.file.path, {
         folder: "estimations",
@@ -55,98 +86,130 @@ export const createEstimation = async (
       imageId = uploadResult.imageId;
     }
 
-    // Buat estimation dalam transaction
-    const estimation = await prisma.$transaction(async (tx) => {
-      // Buat estimation utama
-      const newEstimation = await tx.estimation.create({
-        data: {
-          projectName,
-          projectOwner: owner,
-          ppn: parseFloat(ppn.toString()),
-          notes: notes || "",
-          authorId: userId,
-        },
-      });
+    const { newEstimationId } = await prisma.$transaction(
+      async (tx) => {
+        // 1) Header
+        const newEst = await tx.estimation.create({
+          data: {
+            projectName,
+            projectOwner: owner,
+            ppn: parseFloat(ppn.toString()),
+            notes: notes || "",
+            authorId: userId,
+            imageUrl: imageUrl ?? undefined,
+            imageId: imageId ?? undefined,
+          },
+          select: { id: true },
+        });
 
-      // Buat custom fields jika ada
-      if (customFields && Object.keys(customFields).length > 0) {
-        const customFieldsData = Object.entries(customFields).map(
-          ([label, value]) => ({
+        // 2) Custom fields (optional)
+        if (customFields && Object.keys(customFields).length > 0) {
+          const rows = Object.entries(customFields).map(([label, value]) => ({
+            id: randomUUID(),
             label,
             value,
-            type: "text", // Default type, bisa disesuaikan
-            estimationId: newEstimation.id,
-          })
-        );
+            type: "text",
+            estimationId: newEst.id,
+          }));
+          await tx.customField.createMany({ data: rows });
+        }
 
-        await tx.customField.createMany({
-          data: customFieldsData,
-        });
-      }
+        // 3) Items (batch)
+        if (estimationItem && estimationItem.length > 0) {
+          const estItemRows: {
+            id: string;
+            title: string;
+            estimationId: string;
+          }[] = [];
 
-      // Buat estimation items dan details
-      if (estimationItem && estimationItem.length > 0) {
-        for (const section of estimationItem) {
-          const estimationItemRecord = await tx.estimationItem.create({
-            data: {
+          const itemDetailRows: Prisma.ItemDetailCreateManyInput[] = [];
+
+          const volDetailRows: {
+            id: string;
+            nama: string;
+            jenis: "ADD" | "SUB";
+            panjang: number;
+            lebar: number;
+            tinggi: number;
+            jumlah: number;
+            volume: number;
+            extras: Prisma.InputJsonValue;
+            itemDetailId: string;
+          }[] = [];
+          const allCodes: string[] = [];
+          for (const section of estimationItem ?? []) {
+            for (const detail of section.item ?? []) {
+              if (detail.kode) allCodes.push(detail.kode);
+            }
+          }
+          // Bangun map kode -> hspItemId
+          const hspMap = await buildHspCodeMap(tx, userId, allCodes);
+          for (const section of estimationItem) {
+            const estItemId = randomUUID();
+            estItemRows.push({
+              id: estItemId,
               title: section.title,
-              estimationId: newEstimation.id,
-            },
-          });
+              estimationId: newEst.id,
+            });
 
-          if (section.item && section.item.length > 0) {
-            for (const detail of section.item) {
-              // 1) create ItemDetail
-              const itemDetail = await tx.itemDetail.create({
-                data: {
-                  kode: detail.kode,
-                  deskripsi: detail.nama,
-                  volume: Number(detail.volume ?? 0),
-                  satuan: detail.satuan,
-                  hargaSatuan: Number(detail.harga ?? 0),
-                  hargaTotal: Number(detail.hargaTotal ?? 0),
-                  estimationItemId: estimationItemRecord.id,
-                },
+            for (const detail of section.item ?? []) {
+              const itemId = randomUUID();
+              const hspId = detail.kode ? hspMap.get(detail.kode) : undefined;
+              itemDetailRows.push({
+                id: itemId,
+                kode: detail.kode ?? "",
+                deskripsi: detail.nama ?? "",
+                volume: Number(detail.volume ?? 0),
+                satuan: detail.satuan ?? "",
+                hargaSatuan: Number(detail.harga ?? 0),
+                hargaTotal: Number(detail.hargaTotal ?? 0),
+                estimationItemId: estItemId,
+                hspItemId: hspId,
               });
 
-              // 2) create VolumeDetail (jika ada)
-              if (detail.details && detail.details.length > 0) {
-                const vdData = detail.details.map((d) => ({
-                  nama: d.nama,
-                  jenis: mapJenisToVolumeOp(d.jenis), // "ADD" | "SUB"
+              for (const d of detail.details ?? []) {
+                volDetailRows.push({
+                  id: randomUUID(),
+                  nama: d.nama ?? "",
+                  jenis: mapJenisToVolumeOp(d.jenis),
                   panjang: Number(d.panjang ?? 0),
                   lebar: Number(d.lebar ?? 0),
                   tinggi: Number(d.tinggi ?? 0),
                   jumlah: Number(d.jumlah ?? 0),
                   volume: Number(d.volume ?? 0),
-                  itemDetailId: itemDetail.id,
-                }));
-
-                await tx.volumeDetail.createMany({ data: vdData });
+                  extras: Array.isArray(d.extras) ? d.extras : [],
+                  itemDetailId: itemId,
+                });
               }
             }
           }
+
+          if (estItemRows.length) {
+            await tx.estimationItem.createMany({ data: estItemRows });
+          }
+          if (itemDetailRows.length) {
+            await tx.itemDetail.createMany({ data: itemDetailRows });
+          }
+          if (volDetailRows.length) {
+            await tx.volumeDetail.createMany({ data: volDetailRows });
+          }
         }
-      }
 
-      return newEstimation;
-    });
+        return { newEstimationId: newEst.id };
+      },
+      // Per-call transaction options (bisa override global)
+      { timeout: 20000, maxWait: 20000 }
+    );
 
-    // Ambil data lengkap untuk response
+    // Fetch lengkap untuk response
     const fullEstimation = await prisma.estimation.findUnique({
-      where: { id: estimation.id },
+      where: { id: newEstimationId },
       include: {
-        author: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
+        author: { select: { id: true, name: true, email: true } },
         customFields: true,
         items: {
           include: {
-            details: true,
+            details: { include: { volumeDetails: true } },
           },
         },
       },
@@ -166,7 +229,9 @@ export const createEstimation = async (
   }
 };
 
-// Get all estimations for authenticated user
+/* =========================================================
+ * GET LIST
+ * =======================================================*/
 export const getEstimations = async (
   req: AuthenticatedRequest,
   res: Response
@@ -183,7 +248,6 @@ export const getEstimations = async (
     const limitNumber = parseInt(limit as string);
     const offset = (pageNumber - 1) * limitNumber;
 
-    // Build where condition
     const whereCondition: any = { authorId: userId };
     if (search) {
       whereCondition.OR = [
@@ -200,11 +264,7 @@ export const getEstimations = async (
           customFields: true,
           items: {
             include: {
-              details: {
-                include: {
-                  volumeDetails: true, // <-- breakdown ikut dibawa
-                },
-              },
+              details: { include: { volumeDetails: true } },
             },
           },
         },
@@ -234,7 +294,9 @@ export const getEstimations = async (
   }
 };
 
-// Get single estimation by ID
+/* =========================================================
+ * GET BY ID
+ * =======================================================*/
 export const getEstimationById = async (
   req: AuthenticatedRequest,
   res: Response
@@ -257,7 +319,7 @@ export const getEstimationById = async (
           include: {
             details: {
               include: {
-                volumeDetails: true, // <-- breakdown ikut dibawa
+                volumeDetails: true,
               },
             },
           },
@@ -286,7 +348,9 @@ export const getEstimationById = async (
   }
 };
 
-// Update estimation
+/* =========================================================
+ * UPDATE (optimized batch rewrite)
+ * =======================================================*/
 export const updateEstimation = async (
   req: AuthenticatedRequest,
   res: Response
@@ -308,9 +372,9 @@ export const updateEstimation = async (
       return;
     }
 
-    // Pastikan estimation milik user
     const existingEstimation = await prisma.estimation.findFirst({
       where: { id, authorId: userId },
+      select: { id: true },
     });
 
     if (!existingEstimation) {
@@ -321,10 +385,8 @@ export const updateEstimation = async (
       return;
     }
 
-    // (opsional) upload image baru bila ada
     let imageUrl: string | undefined;
     let imageId: string | undefined;
-
     if (req.file) {
       const uploadResult = await uploadToCloudinary(req.file.path, {
         folder: "estimations",
@@ -334,125 +396,140 @@ export const updateEstimation = async (
       imageId = uploadResult.imageId;
     }
 
-    // Transaction
-    const updatedEstimation = await prisma.$transaction(async (tx) => {
-      // 1) Update estimation utama
-      const updateData: any = {};
-      if (projectName !== undefined) updateData.projectName = projectName;
-      if (owner !== undefined) updateData.projectOwner = owner;
-      if (ppn !== undefined) updateData.ppn = parseFloat(ppn.toString());
-      if (notes !== undefined) updateData.notes = notes;
-      if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
-      if (imageId !== undefined) updateData.imageId = imageId;
+    const { updatedId } = await prisma.$transaction(
+      async (tx) => {
+        // 1) Update header
+        const updateData: any = {};
+        if (projectName !== undefined) updateData.projectName = projectName;
+        if (owner !== undefined) updateData.projectOwner = owner;
+        if (ppn !== undefined) updateData.ppn = parseFloat(ppn.toString());
+        if (notes !== undefined) updateData.notes = notes;
+        if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
+        if (imageId !== undefined) updateData.imageId = imageId;
 
-      await tx.estimation.update({
-        where: { id },
-        data: updateData,
-      });
+        if (Object.keys(updateData).length) {
+          await tx.estimation.update({ where: { id }, data: updateData });
+        }
 
-      // 2) Replace custom fields (jika dikirim)
-      if (customFields) {
-        await tx.customField.deleteMany({ where: { estimationId: id } });
-
-        if (Object.keys(customFields).length > 0) {
-          const customFieldsData = Object.entries(customFields).map(
-            ([label, value]) => ({
+        // 2) Custom fields (rewrite)
+        if (customFields) {
+          await tx.customField.deleteMany({ where: { estimationId: id } });
+          const entries = Object.entries(customFields);
+          if (entries.length > 0) {
+            const rows = entries.map(([label, value]) => ({
+              id: randomUUID(),
               label,
               value,
               type: "text",
               estimationId: id,
-            })
-          );
-          await tx.customField.createMany({ data: customFieldsData });
+            }));
+            await tx.customField.createMany({ data: rows });
+          }
         }
-      }
 
-      // 3) Replace items + details + volumeDetails (jika dikirim)
-      if (estimationItem) {
-        // hapus breakdown (VolumeDetail) -> ItemDetail -> EstimationItem
-        await tx.volumeDetail.deleteMany({
-          where: {
-            itemDetail: {
-              estimationItem: {
-                estimationId: id,
-              },
-            },
-          },
-        });
+        // 3) Rewrite items if provided (fast path with batch)
+        if (estimationItem) {
+          // Hapus lama dengan urutan aman
+          await tx.volumeDetail.deleteMany({
+            where: { itemDetail: { estimationItem: { estimationId: id } } },
+          });
+          await tx.itemDetail.deleteMany({
+            where: { estimationItem: { estimationId: id } },
+          });
+          await tx.estimationItem.deleteMany({ where: { estimationId: id } });
 
-        await tx.itemDetail.deleteMany({
-          where: {
-            estimationItem: {
-              estimationId: id,
-            },
-          },
-        });
+          // Build batch rows
+          const estItemRows: {
+            id: string;
+            title: string;
+            estimationId: string;
+          }[] = [];
 
-        await tx.estimationItem.deleteMany({
-          where: { estimationId: id },
-        });
-
-        // tulis ulang
-        for (const section of estimationItem) {
-          const estimationItemRecord = await tx.estimationItem.create({
-            data: {
+          const itemDetailRows: Prisma.ItemDetailCreateManyInput[] = [];
+          const volDetailRows: {
+            id: string;
+            nama: string;
+            jenis: "ADD" | "SUB";
+            panjang: number;
+            lebar: number;
+            tinggi: number;
+            jumlah: number;
+            volume: number;
+            extras: Prisma.InputJsonValue;
+            itemDetailId: string;
+          }[] = [];
+          const allCodes: string[] = [];
+          for (const section of estimationItem ?? []) {
+            for (const detail of section.item ?? []) {
+              if (detail.kode) allCodes.push(detail.kode);
+            }
+          }
+          const hspMap = await buildHspCodeMap(tx, userId, allCodes);
+          for (const section of estimationItem) {
+            const estItemId = randomUUID();
+            estItemRows.push({
+              id: estItemId,
               title: section.title,
               estimationId: id,
-            },
-          });
+            });
 
-          if (section.item && section.item.length > 0) {
-            for (const detail of section.item) {
-              // ItemDetail
-              const itemDetail = await tx.itemDetail.create({
-                data: {
-                  kode: detail.kode,
-                  deskripsi: detail.nama,
-                  volume: Number(detail.volume ?? 0),
-                  satuan: detail.satuan,
-                  hargaSatuan: Number(detail.harga ?? 0),
-                  hargaTotal: Number(detail.hargaTotal ?? 0),
-                  estimationItemId: estimationItemRecord.id,
-                },
+            for (const detail of section.item ?? []) {
+              const itemId = randomUUID();
+              const hspId = detail.kode ? hspMap.get(detail.kode) : undefined;
+              itemDetailRows.push({
+                id: itemId,
+                kode: detail.kode ?? "",
+                deskripsi: detail.nama ?? "",
+                volume: Number(detail.volume ?? 0),
+                satuan: detail.satuan ?? "",
+                hargaSatuan: Number(detail.harga ?? 0),
+                hargaTotal: Number(detail.hargaTotal ?? 0),
+                estimationItemId: estItemId,
+                hspItemId: hspId,
               });
 
-              // VolumeDetail (breakdown) jika ada
-              if (detail.details && detail.details.length > 0) {
-                const vdData = detail.details.map((d) => ({
-                  nama: d.nama,
-                  jenis: mapJenisToVolumeOp(d.jenis), // "ADD" | "SUB"
+              for (const d of detail.details ?? []) {
+                volDetailRows.push({
+                  id: randomUUID(),
+                  nama: d.nama ?? "",
+                  jenis: mapJenisToVolumeOp(d.jenis),
                   panjang: Number(d.panjang ?? 0),
                   lebar: Number(d.lebar ?? 0),
                   tinggi: Number(d.tinggi ?? 0),
                   jumlah: Number(d.jumlah ?? 0),
-                  volume: Number(d.volume ?? 0), // p*l*t*jumlah (positif)
-                  itemDetailId: itemDetail.id,
-                }));
-
-                await tx.volumeDetail.createMany({ data: vdData });
+                  volume: Number(d.volume ?? 0),
+                  extras: Array.isArray(d.extras) ? d.extras : [],
+                  itemDetailId: itemId,
+                });
               }
             }
           }
+
+          if (estItemRows.length) {
+            await tx.estimationItem.createMany({ data: estItemRows });
+          }
+          if (itemDetailRows.length) {
+            await tx.itemDetail.createMany({ data: itemDetailRows });
+          }
+          if (volDetailRows.length) {
+            await tx.volumeDetail.createMany({ data: volDetailRows });
+          }
         }
-      }
 
-      // return minimal entity for query berikutnya
-      return { id };
-    });
+        return { updatedId: id };
+      },
+      { timeout: 20000, maxWait: 20000 }
+    );
 
-    // Ambil data lengkap untuk response (include sampai breakdown)
+    // Return lengkap
     const fullEstimation = await prisma.estimation.findUnique({
-      where: { id: updatedEstimation.id },
+      where: { id: updatedId },
       include: {
         author: { select: { id: true, name: true, email: true } },
         customFields: true,
         items: {
           include: {
-            details: {
-              include: {
-                volumeDetails: true, // <— breakdown ikut dibawa
-              },
-            },
+            details: { include: { volumeDetails: true } },
           },
         },
       },
@@ -472,7 +549,9 @@ export const updateEstimation = async (
   }
 };
 
-// Delete estimation
+/* =========================================================
+ * DELETE
+ * =======================================================*/
 export const deleteEstimation = async (
   req: AuthenticatedRequest,
   res: Response
@@ -486,12 +565,8 @@ export const deleteEstimation = async (
       return;
     }
 
-    // Check if estimation exists and belongs to user
     const existingEstimation = await prisma.estimation.findFirst({
-      where: {
-        id,
-        authorId: userId,
-      },
+      where: { id, authorId: userId },
     });
 
     if (!existingEstimation) {
@@ -502,31 +577,16 @@ export const deleteEstimation = async (
       return;
     }
 
-    // Delete estimation dalam transaction
     await prisma.$transaction(async (tx) => {
-      // Delete item details
+      await tx.volumeDetail.deleteMany({
+        where: { itemDetail: { estimationItem: { estimationId: id } } },
+      });
       await tx.itemDetail.deleteMany({
-        where: {
-          estimationItem: {
-            estimationId: id,
-          },
-        },
+        where: { estimationItem: { estimationId: id } },
       });
-
-      // Delete estimation items
-      await tx.estimationItem.deleteMany({
-        where: { estimationId: id },
-      });
-
-      // Delete custom fields
-      await tx.customField.deleteMany({
-        where: { estimationId: id },
-      });
-
-      // Delete estimation
-      await tx.estimation.delete({
-        where: { id },
-      });
+      await tx.estimationItem.deleteMany({ where: { estimationId: id } });
+      await tx.customField.deleteMany({ where: { estimationId: id } });
+      await tx.estimation.delete({ where: { id } });
     });
 
     res.status(200).json({
@@ -542,7 +602,9 @@ export const deleteEstimation = async (
   }
 };
 
-// Get estimation statistics for user
+/* =========================================================
+ * STATS
+ * =======================================================*/
 export const getEstimationStats = async (
   req: AuthenticatedRequest,
   res: Response
@@ -560,9 +622,7 @@ export const getEstimationStats = async (
 
     res.status(200).json({
       status: "success",
-      data: {
-        total,
-      },
+      data: { total },
     });
   } catch (error) {
     console.error("Get estimation stats error:", error);
@@ -573,6 +633,9 @@ export const getEstimationStats = async (
   }
 };
 
+/* =========================================================
+ * DOWNLOADERS (unchanged)
+ * =======================================================*/
 export const downloadEstimationPdf = async (
   req: AuthenticatedRequest,
   res: Response
@@ -656,17 +719,14 @@ export const downloadEstimationExcel = async (
       return;
     }
 
-    // >>> Perubahan di sini: nama file "RAB_<Nama Estimation>.xlsx"
     const safeName = sanitizeFileName(estimation.projectName);
     const fileName = `RAB_${safeName}.xlsx`;
-
     const excelBuffer = await buildEstimationExcel(estimation as any);
 
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
-    // aman untuk spasi/UTF-8
     res.setHeader(
       "Content-Disposition",
       `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`

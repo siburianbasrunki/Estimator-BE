@@ -1,12 +1,13 @@
-// src/controllers/hsp.controller.ts
+// src/controllers/hspImport.controller.ts
 import { Request, Response } from "express";
 import prisma from "../lib/prisma";
 import ExcelJS from "exceljs";
 import fs from "fs";
+import { scopeOf } from "../lib/_scoping";
 
 export interface AuthenticatedRequest extends Request {
-  userId?: string;
-  userRole?: string;
+  userId?: string; // fallback kalau middleware lama
+  userRole?: string; // fallback kalau middleware lama
 }
 
 type ParsedRow =
@@ -114,7 +115,6 @@ const detectHeader = (
 
   const matchToken = (text: string, list: string[]) =>
     list.some((w) => text.toLowerCase() === w);
-
   const normalizeCell = (s: string) =>
     s.toLowerCase().replace(/\s+/g, " ").replace(/[:*]/g, "").trim();
 
@@ -249,12 +249,18 @@ export const importHSP = async (
   const lockExistingPrice =
     String(req.query.lockExistingPrice || "true").toLowerCase() === "true";
 
+  // === Scope ===
+  const userId = (req as any).user?.id || req.userId || undefined;
+  const scope = scopeOf(userId); // pastikan ini return string stabil, mis. "GLOBAL" untuk admin
+
   // === Validate file ===
   if (!req.file) {
-    res.status(400).json({
-      status: "error",
-      error: "No file uploaded. Field name must be 'file'.",
-    });
+    res
+      .status(400)
+      .json({
+        status: "error",
+        error: "No file uploaded. Field name must be 'file'.",
+      });
     return;
   }
   const filePath = req.file.path;
@@ -315,13 +321,13 @@ export const importHSP = async (
   try {
     await prisma.$transaction(
       async (tx) => {
-        /* ========== 1) Upsert CATEGORIES ========== */
+        /* ========== 1) Upsert CATEGORIES (scoped) ========== */
         const allCategoryNames = Array.from(byCategory.keys());
 
-        // prefetch existing for counts
+        // prefetch existing untuk kalkulasi created/updated
         const existingCats = allCategoryNames.length
           ? await tx.hSPCategory.findMany({
-              where: { name: { in: allCategoryNames } },
+              where: { scope, name: { in: allCategoryNames } },
               select: { id: true, name: true },
             })
           : [];
@@ -331,13 +337,13 @@ export const importHSP = async (
         ).length;
         updatedCategories = allCategoryNames.length - createdCategories;
 
-        // upsert to ensure ids
+        // upsert pakai compound unique scope+name
         const categoryResults = await Promise.all(
           allCategoryNames.map((name) =>
             tx.hSPCategory.upsert({
-              where: { name },
-              create: { name },
-              update: {},
+              where: { scope_name_unique: { scope, name } },
+              create: { scope, name },
+              update: {}, // nama kategori tidak diupdate di import
             })
           )
         );
@@ -345,7 +351,7 @@ export const importHSP = async (
         const categoryMap = new Map<string, string>();
         for (const cat of categoryResults) categoryMap.set(cat.name, cat.id);
 
-        /* ========== 2) Prepare ITEMS (dedupe by kode) ========== */
+        /* ========== 2) Dedupe ITEMS per kode ========== */
         const dedupedByKode = new Map<
           string,
           {
@@ -377,7 +383,6 @@ export const importHSP = async (
               kode,
               deskripsi,
               satuan: it.satuan || "",
-              // harga: tergantung opsi useHargaFile
               harga: useHargaFile ? (it.harga ?? 0) : 0,
               categoryId,
             });
@@ -387,19 +392,20 @@ export const importHSP = async (
         const uniqueItems = Array.from(dedupedByKode.values());
         const allCodes = uniqueItems.map((u) => u.kode);
 
-        // fetch existing items for decisions
+        // fetch existing items DI SCOPE YANG SAMA
         const existingItems = allCodes.length
           ? await tx.hSPItem.findMany({
-              where: { kode: { in: allCodes } },
+              where: { scope, kode: { in: allCodes } },
               select: { id: true, kode: true, harga: true },
             })
           : [];
         const existMap = new Map(existingItems.map((e) => [e.kode, e]));
 
-        /* ========== 3a) CREATE many for non-exist ========== */
+        /* ========== 3a) CREATE many untuk yang belum ada (sertakan scope) ========== */
         const toCreate = uniqueItems
           .filter((u) => !existMap.has(u.kode))
           .map((u) => ({
+            scope, // ← penting
             kode: u.kode,
             deskripsi: u.deskripsi,
             satuan: u.satuan,
@@ -416,7 +422,7 @@ export const importHSP = async (
           createdItems = r.count;
         }
 
-        /* ========== 3b) UPDATE for existing (chunked) ========== */
+        /* ========== 3b) UPDATE untuk yang sudah ada (pakai where compound unique) ========== */
         const toUpdate = uniqueItems.filter((u) => existMap.has(u.kode));
         updatedItems = 0;
         updatedPriceCount = 0;
@@ -424,11 +430,7 @@ export const importHSP = async (
         await runInChunks(toUpdate, 50, async (u) => {
           const ex = existMap.get(u.kode)!;
 
-          // aturan timpa harga:
-          // - kalau useHargaFile=false → jangan ubah harga sama sekali
-          // - kalau useHargaFile=true:
-          //    - jika lockExistingPrice=true → hanya set harga jika saat ini 0/undefined
-          //    - jika lockExistingPrice=false → selalu set harga sesuai file
+          // aturan update harga
           const shouldUpdateHarga =
             useHargaFile && (!lockExistingPrice || (ex.harga ?? 0) === 0);
 
@@ -443,7 +445,7 @@ export const importHSP = async (
           }
 
           await tx.hSPItem.update({
-            where: { kode: u.kode },
+            where: { scope_kode_unique: { scope, kode: u.kode } }, // ← penting
             data,
           });
           updatedItems += 1;
@@ -488,6 +490,7 @@ export const importHSP = async (
         detectedHeader: header,
         parsedRows: parsed.length,
         categoriesFound: Array.from(byCategory.keys()),
+        scope,
       },
     },
   });
