@@ -91,7 +91,6 @@ const BORDER_THIN = {
 const NUMFMT_IDR = '"Rp" #,##0;-"Rp" #,##0;""';
 const NUMFMT_DATETIME = "dd mmm yyyy hh:mm";
 
-// Angka -> Romawi
 const roman = (n: number) => {
   const map: [number, string][] = [
     [1000, "M"],
@@ -118,13 +117,11 @@ const roman = (n: number) => {
   return r;
 };
 
-// Safe number helper
 const N = (v: any, def = 0) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : def;
 };
 
-// Label group komponen AHSP
 const GROUP_LABEL: Record<AHSPComponentGroup, string> = {
   LABOR: "A • Labor",
   MATERIAL: "B • Material",
@@ -133,16 +130,96 @@ const GROUP_LABEL: Record<AHSPComponentGroup, string> = {
 };
 
 /** =========================
- *   SHEETS
+ *   Header helpers
  *  ========================= */
+const pxToColWidth = (px: number) => Math.max(10, Math.round((px - 5) / 7));
+const pxToRowHeight = (px: number) => Math.max(24, Math.round(px * 0.75));
 
-/** Kategori Dipakai — hanya: Kategori, Total; tanpa judul besar */
+const colNumToLetter = (n: number) => {
+  let s = "";
+  while (n > 0) {
+    const m = (n - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s || "A";
+};
+
+// SAFE: auto-merge sampai kolom terakhir; fallback kalau belum ada columns
+function addTitleBarAuto(
+  ws: ExcelJS.Worksheet,
+  title: string,
+  fallbackCols = 8
+) {
+  const count = ws.columnCount || (ws as any).columns?.length || fallbackCols;
+  const last = colNumToLetter(Math.max(1, count));
+  const range = `A1:${last}1`;
+  ws.mergeCells(range);
+  const c = ws.getCell("A1");
+  c.value = title;
+  c.font = FONT.title as any;
+  c.alignment = { vertical: "middle", horizontal: "center" };
+  c.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: COLORS.titleBlue },
+  };
+  ws.getRow(1).height = Math.max(ws.getRow(1).height || 0, 28);
+}
+
+function addHeaderWithLogo(
+  wb: ExcelJS.Workbook,
+  ws: ExcelJS.Worksheet,
+  title: string,
+  logo: { base64: string; extension: "png" | "jpeg" },
+  size: { width: number; height: number },
+  titleMergeUntilColLetter: string
+) {
+  ws.getRow(1).height = Math.max(
+    ws.getRow(1).height || 0,
+    pxToRowHeight(size.height)
+  );
+  ws.getColumn(1).width = Math.max(
+    ws.getColumn(1).width ?? 10,
+    pxToColWidth(size.width + 10)
+  );
+
+  try {
+    const imgId = wb.addImage({
+      base64: logo.base64,
+      extension: logo.extension,
+    });
+    ws.addImage(imgId, {
+      tl: { col: 0, row: 0 },
+      ext: { width: size.width, height: size.height },
+      editAs: "oneCell",
+    });
+  } catch (e) {
+    console.warn("Logo placement failed:", e);
+  }
+
+  const mergeRange = `B1:${titleMergeUntilColLetter}1`;
+  ws.mergeCells(mergeRange);
+  const t = ws.getCell("B1");
+  t.value = title;
+  t.font = FONT.title as any;
+  t.alignment = { vertical: "middle", horizontal: "center" };
+  t.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: COLORS.titleBlue },
+  };
+}
+
+/** =========================
+ *   SHEETS (return ws)
+ *  ========================= */
 function addSheetKategoriDipakai(
   wb: ExcelJS.Workbook,
   est: EstimationWithRelations
 ) {
   const ws = wb.addWorksheet("Kategori Dipakai", {
-    views: [{ state: "frozen", ySplit: 1 }],
+    views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: {
       orientation: "landscape",
       fitToPage: true,
@@ -162,7 +239,9 @@ function addSheetKategoriDipakai(
     },
   ];
 
-  const header = ws.getRow(1);
+  addTitleBarAuto(ws, "Kategori Dipakai");
+
+  const header = ws.getRow(2);
   header.values = ["Kategori", "Total (Rp)"];
   header.eachCell((c) => {
     c.font = FONT.header as any;
@@ -175,7 +254,6 @@ function addSheetKategoriDipakai(
     c.border = BORDER_THIN as any;
   });
 
-  // total per kategori: pakai category.name kalau ada, fallback ke section.title
   const totalsByCat = new Map<string, number>();
   for (const section of est.items) {
     for (const d of section.details) {
@@ -192,10 +270,9 @@ function addSheetKategoriDipakai(
   const rows = [...totalsByCat.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map<[string, number]>(([name, total]) => [name, total]);
-
   if (rows.length) ws.addRows(rows);
 
-  const dataStart = 2;
+  const dataStart = 3;
   for (let r = dataStart; r < dataStart + rows.length; r++) {
     const row = ws.getRow(r);
     row.eachCell((c) => (c.border = BORDER_THIN as any));
@@ -206,15 +283,16 @@ function addSheetKategoriDipakai(
         fgColor: { argb: COLORS.zebra },
       };
   }
+
+  return ws;
 }
 
-/** Job Item Dipakai — hanya: Nama Pekerjaan, Satuan, Harga Satuan (Rp); tanpa judul besar */
 function addSheetJobItemDipakai(
   wb: ExcelJS.Workbook,
   est: EstimationWithRelations
 ) {
   const ws = wb.addWorksheet("Job Item Dipakai", {
-    views: [{ state: "frozen", ySplit: 1 }],
+    views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: {
       orientation: "landscape",
       fitToPage: true,
@@ -235,7 +313,9 @@ function addSheetJobItemDipakai(
     },
   ];
 
-  const header = ws.getRow(1);
+  addTitleBarAuto(ws, "Job Item Dipakai");
+
+  const header = ws.getRow(2);
   header.values = ["Nama Pekerjaan", "Satuan", "Harga Satuan (Rp)"];
   header.eachCell((c) => {
     c.font = FONT.header as any;
@@ -248,7 +328,6 @@ function addSheetJobItemDipakai(
     c.border = BORDER_THIN as any;
   });
 
-  // De-duplicate per kode (fallback: deskripsi+satuan)
   const uniq = new Map<string, { desk: string; sat: string; hs: number }>();
   for (const it of est.items) {
     for (const d of it.details) {
@@ -271,7 +350,7 @@ function addSheetJobItemDipakai(
   ]);
   if (rows.length) ws.addRows(rows);
 
-  const dataStart = 2;
+  const dataStart = 3;
   for (let r = dataStart; r < dataStart + rows.length; r++) {
     const row = ws.getRow(r);
     row.eachCell((c, ci) => {
@@ -286,12 +365,13 @@ function addSheetJobItemDipakai(
         fgColor: { argb: COLORS.zebra },
       };
   }
+
+  return ws;
 }
 
-/** Volume — kolom Section/Kode/Deskripsi DIHAPUS; tanpa judul besar */
 function addSheetVolume(wb: ExcelJS.Workbook, est: EstimationWithRelations) {
   const ws = wb.addWorksheet("Volume", {
-    views: [{ state: "frozen", ySplit: 1 }],
+    views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: {
       orientation: "landscape",
       fitToPage: true,
@@ -313,7 +393,9 @@ function addSheetVolume(wb: ExcelJS.Workbook, est: EstimationWithRelations) {
     { header: "Satuan", key: "sat", width: 10 },
   ];
 
-  const header = ws.getRow(1);
+  addTitleBarAuto(ws, "Volume Detail");
+
+  const header = ws.getRow(2);
   header.values = ws.columns.map((c) => (c.header ?? "") as string);
   header.eachCell((c) => {
     c.font = FONT.header as any;
@@ -350,7 +432,7 @@ function addSheetVolume(wb: ExcelJS.Workbook, est: EstimationWithRelations) {
   }
   if (rows.length) ws.addRows(rows);
 
-  const dataStart = 2;
+  const dataStart = 3;
   for (let r = dataStart; r < dataStart + rows.length; r++) {
     const row = ws.getRow(r);
     row.eachCell((c, ci) => {
@@ -366,15 +448,16 @@ function addSheetVolume(wb: ExcelJS.Workbook, est: EstimationWithRelations) {
         fgColor: { argb: COLORS.zebra },
       };
   }
+
+  return ws;
 }
 
-/** AHSP Dipakai — breakdown komponen per HSP yang benar-benar digunakan */
 function addSheetAHSPDipakai(
   wb: ExcelJS.Workbook,
   est: EstimationWithRelations
 ) {
   const ws = wb.addWorksheet("AHSP Dipakai", {
-    views: [{ state: "frozen", ySplit: 1 }],
+    views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: {
       orientation: "landscape",
       fitToPage: true,
@@ -407,7 +490,9 @@ function addSheetAHSPDipakai(
     },
   ];
 
-  const header = ws.getRow(1);
+  addTitleBarAuto(ws, "AHSP Dipakai");
+
+  const header = ws.getRow(2);
   header.values = ws.columns.map((c) => (c.header ?? "") as string);
   header.eachCell((c) => {
     c.font = FONT.header as any;
@@ -453,7 +538,6 @@ function addSheetAHSPDipakai(
         ]);
       }
 
-      // Ringkasan recipe (opsional)
       if (
         recipe.subtotalABC != null ||
         recipe.overheadAmount != null ||
@@ -495,7 +579,6 @@ function addSheetAHSPDipakai(
           "",
           N(recipe.finalUnitPrice, 0),
         ]);
-        // spacer
         rows.push(["", "", "", "", "", "", "", "", "", ""]);
       }
     }
@@ -503,7 +586,7 @@ function addSheetAHSPDipakai(
 
   if (rows.length) ws.addRows(rows);
 
-  const dataStart = 2;
+  const dataStart = 3;
   for (let r = dataStart; r < dataStart + rows.length; r++) {
     const row = ws.getRow(r);
     row.eachCell((c, ci) => {
@@ -511,23 +594,23 @@ function addSheetAHSPDipakai(
       if ([8, 9, 10].includes(ci)) c.alignment = { horizontal: "right" };
       if ([2, 6].includes(ci)) c.alignment = { wrapText: true };
     });
-    if ((r - dataStart) % 2 === 1) {
+    if ((r - dataStart) % 2 === 1)
       row.fill = {
         type: "pattern",
         pattern: "solid",
         fgColor: { argb: COLORS.zebra },
       };
-    }
   }
+
+  return ws;
 }
 
-/** Master Item Dipakai — agregasi unik master item yang muncul di AHSP */
 function addSheetMasterItemDipakai(
   wb: ExcelJS.Workbook,
   est: EstimationWithRelations
 ) {
   const ws = wb.addWorksheet("Master Item Dipakai", {
-    views: [{ state: "frozen", ySplit: 1 }],
+    views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: {
       orientation: "landscape",
       fitToPage: true,
@@ -558,7 +641,9 @@ function addSheetMasterItemDipakai(
     { header: "Catatan", key: "notes", width: 28 },
   ];
 
-  const header = ws.getRow(1);
+  addTitleBarAuto(ws, "Master Item Dipakai");
+
+  const header = ws.getRow(2);
   header.values = ws.columns.map((c) => (c.header ?? "") as string);
   header.eachCell((c) => {
     c.font = FONT.header as any;
@@ -627,10 +712,9 @@ function addSheetMasterItemDipakai(
       a.sumSubtotal,
       a.notes || "",
     ]);
-
   if (rows.length) ws.addRows(rows);
 
-  const dataStart = 2;
+  const dataStart = 3;
   for (let r = dataStart; r < dataStart + rows.length; r++) {
     const row = ws.getRow(r);
     row.eachCell((c, ci) => {
@@ -638,29 +722,34 @@ function addSheetMasterItemDipakai(
       if ([5, 7].includes(ci)) c.alignment = { horizontal: "right" };
       if ([2, 8].includes(ci)) c.alignment = { wrapText: true };
     });
-    if ((r - dataStart) % 2 === 1) {
+    if ((r - dataStart) % 2 === 1)
       row.fill = {
         type: "pattern",
         pattern: "solid",
         fgColor: { argb: COLORS.zebra },
       };
-    }
   }
+
+  return ws;
 }
 
 /** =========================
- *   MAIN: buildEstimationExcel
+ *   MAIN
  *  ========================= */
 export async function buildEstimationExcel(
-  est: EstimationWithRelations
+  est: EstimationWithRelations,
+  opts?: {
+    logo?: { base64: string; extension: "png" | "jpeg" };
+    logoSize?: { width: number; height: number };
+  }
 ): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   wb.creator = "Estimation App";
   wb.created = new Date();
 
-  /** ========= Sheet 1: Ringkasan ========= */
+  /** ========= Sheet 1: Ringkasan (tanpa logo) ========= */
   const s1 = wb.addWorksheet("Ringkasan", {
-    views: [{ state: "frozen", ySplit: 4 }],
+    views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: {
       orientation: "portrait",
       fitToPage: true,
@@ -670,20 +759,18 @@ export async function buildEstimationExcel(
     properties: { defaultRowHeight: 18 },
   });
 
-  s1.mergeCells("A1", "D1");
-  const titleCell = s1.getCell("A1");
-  titleCell.value = `Ringkasan Estimasi • ${est.projectName}`;
-  titleCell.fill = {
-    type: "pattern",
-    pattern: "solid",
-    fgColor: { argb: COLORS.titleBlue },
-  };
-  titleCell.alignment = { vertical: "middle", horizontal: "left" };
-  titleCell.font = FONT.title as any;
-  s1.getRow(1).height = 28;
+  // set columns dulu → baru title auto (FIX error)
+  s1.columns = [
+    { header: "", key: "field", width: 28 },
+    { header: "", key: "value", width: 52 },
+    { header: "", key: "field2", width: 28 },
+    { header: "", key: "value2", width: 30 },
+  ];
+  addTitleBarAuto(s1, `Ringkasan Estimasi • ${est.projectName}`);
 
-  s1.mergeCells("A3", "D3");
-  const infoHdr = s1.getCell("A3");
+  // Info header
+  s1.mergeCells("A2", "D2");
+  const infoHdr = s1.getCell("A2");
   infoHdr.value = "Informasi Proyek";
   infoHdr.font = FONT.h2 as any;
   infoHdr.fill = {
@@ -692,13 +779,6 @@ export async function buildEstimationExcel(
     fgColor: { argb: COLORS.lightBlue },
   };
   infoHdr.border = BORDER_THIN as any;
-
-  s1.columns = [
-    { header: "", key: "field", width: 28 },
-    { header: "", key: "value", width: 52 },
-    { header: "", key: "field2", width: 28 },
-    { header: "", key: "value2", width: 30 },
-  ];
 
   const rowsLeft: Array<[string, ExcelJS.CellValue]> = [
     ["Nama Proyek", est.projectName],
@@ -714,7 +794,7 @@ export async function buildEstimationExcel(
     ["Email Author", est.author?.email || "-"],
   ];
 
-  let rowIdx = 4;
+  let rowIdx = 3;
   const maxLen = Math.max(rowsLeft.length, rowsRight.length);
   for (let i = 0; i < maxLen; i++) {
     const r = s1.getRow(rowIdx++);
@@ -741,33 +821,6 @@ export async function buildEstimationExcel(
         pattern: "solid",
         fgColor: { argb: COLORS.zebra },
       };
-  }
-
-  if (est.customFields?.length) {
-    s1.addRow([]);
-    const ch = s1.addRow(["Custom Fields"]);
-    ch.font = FONT.h2 as any;
-    ch.getCell(1).fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: COLORS.lightBlue },
-    };
-    ch.eachCell((cell) => (cell.border = BORDER_THIN as any));
-
-    est.customFields.forEach((cf, idx) => {
-      const r = s1.addRow([cf.label, cf.value]);
-      r.getCell(1).border = BORDER_THIN as any;
-      r.getCell(2).border = BORDER_THIN as any;
-      r.getCell(1).font = FONT.base as any;
-      r.getCell(2).font = FONT.base as any;
-      r.getCell(2).alignment = { wrapText: true };
-      if (idx % 2 === 0)
-        r.fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: COLORS.zebra },
-        };
-    });
   }
 
   const { subtotal, ppnAmount, grandTotal } = calcTotals(est as any);
@@ -821,39 +874,6 @@ export async function buildEstimationExcel(
     properties: { defaultRowHeight: 18 },
   });
 
-  // Bar judul besar
-  sRAB.mergeCells("A1", "F1");
-  const bar = sRAB.getCell("A1");
-  bar.value = "Rencana Anggaran Biaya";
-  bar.font = FONT.title as any;
-  bar.alignment = { vertical: "middle", horizontal: "center" };
-  bar.fill = {
-    type: "pattern",
-    pattern: "solid",
-    fgColor: { argb: COLORS.titleBlue },
-  };
-  sRAB.getRow(1).height = 28;
-
-  // Teks kecil: Judul Estimasi
-  sRAB.mergeCells("A2", "F2");
-  sRAB.getCell("A2").value = `Nama Proyek: ${est.projectName}`;
-  sRAB.getCell("A2").font = FONT.base as any;
-  sRAB.getCell("A2").alignment = { horizontal: "center" };
-
-  // Meta baris 2
-  sRAB.mergeCells("A3", "F3");
-  sRAB.getCell("A3").value =
-    `Pemilik Proyek: ${est.projectOwner}  •  PPN: ${est.ppn}%  •  Status: ${est.status}`;
-  sRAB.getCell("A3").font = FONT.base as any;
-  sRAB.getCell("A3").alignment = { horizontal: "center" };
-
-  // Meta baris 3
-  sRAB.mergeCells("A4", "F4");
-  sRAB.getCell("A4").value =
-    `Dibuat: ${dayjs(est.createdAt).format("DD MMM YYYY HH:mm")}   •   Diupdate: ${dayjs(est.updatedAt).format("DD MMM YYYY HH:mm")}`;
-  sRAB.getCell("A4").font = FONT.base as any;
-  sRAB.getCell("A4").alignment = { horizontal: "center" };
-
   sRAB.columns = [
     { header: "No", key: "no", width: 6 },
     { header: "Uraian Pekerjaan", key: "uraian", width: 56 },
@@ -872,6 +892,41 @@ export async function buildEstimationExcel(
       style: { numFmt: NUMFMT_IDR, alignment: { horizontal: "right" } },
     },
   ];
+
+  if (opts?.logo) {
+    const scale = 0.7;
+    const small = {
+      width: Math.round((opts.logoSize?.width ?? 240) * scale),
+      height: Math.round((opts.logoSize?.height ?? 80) * scale),
+    };
+    addHeaderWithLogo(
+      wb,
+      sRAB,
+      "Rencana Anggaran Biaya",
+      opts.logo,
+      small,
+      "F"
+    );
+  } else {
+    addTitleBarAuto(sRAB, "Rencana Anggaran Biaya", 6);
+  }
+
+  sRAB.mergeCells("A2", "F2");
+  sRAB.getCell("A2").value = `Nama Proyek: ${est.projectName}`;
+  sRAB.getCell("A2").font = FONT.base as any;
+  sRAB.getCell("A2").alignment = { horizontal: "center" };
+
+  sRAB.mergeCells("A3", "F3");
+  sRAB.getCell("A3").value =
+    `Pemilik Proyek: ${est.projectOwner}  •  PPN: ${est.ppn}%  •  Status: ${est.status}`;
+  sRAB.getCell("A3").font = FONT.base as any;
+  sRAB.getCell("A3").alignment = { horizontal: "center" };
+
+  sRAB.mergeCells("A4", "F4");
+  sRAB.getCell("A4").value =
+    `Dibuat: ${dayjs(est.createdAt).format("DD MMM YYYY HH:mm")}   •   Diupdate: ${dayjs(est.updatedAt).format("DD MMM YYYY HH:mm")}`;
+  sRAB.getCell("A4").font = FONT.base as any;
+  sRAB.getCell("A4").alignment = { horizontal: "center" };
 
   const h1 = sRAB.getRow(5);
   h1.values = ["No", "Uraian Pekerjaan", "Satuan", "Volume", "Harga (Rp)", ""];
@@ -906,7 +961,7 @@ export async function buildEstimationExcel(
   est.items.forEach((section, sIdx) => {
     sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
     const secCell = sRAB.getCell(`A${currentRow}`);
-    secCell.value = `${roman(sIdx + 1)}\t${section.title.toUpperCase()}`;
+    secCell.value = `${roman(sIdx + 1)}    ${section.title.toUpperCase()}`; // 4 spasi
     secCell.font = FONT.h2 as any;
     secCell.fill = {
       type: "pattern",
@@ -914,6 +969,7 @@ export async function buildEstimationExcel(
       fgColor: { argb: COLORS.lightBlue },
     };
     secCell.border = BORDER_THIN as any;
+    secCell.alignment = { horizontal: "left" };
     currentRow++;
 
     let no = 1;
@@ -951,7 +1007,6 @@ export async function buildEstimationExcel(
         };
     });
 
-    // subtotal baris
     sRAB.mergeCells(`A${currentRow}:D${currentRow}`);
     const empty = sRAB.getCell(`A${currentRow}`);
     empty.value = "";
@@ -973,14 +1028,13 @@ export async function buildEstimationExcel(
     currentRow++;
   });
 
-  /** ========= SHEET 3-7 ========= */
+  /** ========= Sheet lain (tanpa logo + judul auto) ========= */
   addSheetKategoriDipakai(wb, est);
   addSheetJobItemDipakai(wb, est);
   addSheetVolume(wb, est);
   addSheetAHSPDipakai(wb, est);
   addSheetMasterItemDipakai(wb, est);
 
-  /** Font default untuk semua sheet */
   wb.worksheets.forEach((sh) => {
     sh.eachRow((row) =>
       row.eachCell((cell) => (cell.font = cell.font || (FONT.base as any)))

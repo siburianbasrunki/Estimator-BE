@@ -1,13 +1,17 @@
-// src/controllers/estimation.controller.ts
 import { Request, Response } from "express";
-import prisma, { userClient } from "../lib/prisma";
-import { uploadToCloudinary } from "../utils/cloudinaryUpload";
+import prisma from "../lib/prisma";
+import {
+  uploadToCloudinary,
+  deleteFromCloudinary,
+} from "../utils/cloudinaryUpload";
 import { CreateEstimationData } from "../model/estimation";
 import { sanitizeFileName } from "../utils/exportHelpers";
 import { buildEstimationPdf } from "../utils/pdfGenerator";
 import { buildEstimationExcel } from "../utils/excelGenerator";
 import { randomUUID } from "crypto";
 import { Prisma } from "@prisma/client";
+import axios from "axios";
+
 export interface AuthenticatedRequest extends Request {
   userId?: string;
   userRole?: string;
@@ -16,8 +20,22 @@ export interface AuthenticatedRequest extends Request {
 const mapJenisToVolumeOp = (jenis: string): "ADD" | "SUB" =>
   jenis?.toLowerCase() === "pengurangan" ? "SUB" : "ADD";
 
+/** =========================
+ *  Helpers untuk logo base64
+ * ========================= */
+function guessExt(urlOrMime?: string): "png" | "jpeg" {
+  const s = (urlOrMime || "").toLowerCase();
+  if (s.includes("jpeg") || s.includes(".jpeg") || s.includes(".jpg"))
+    return "jpeg";
+  return "png";
+}
+function toBase64DataUrl(arrbuf: ArrayBuffer, ext: "png" | "jpeg") {
+  const b64 = Buffer.from(arrbuf).toString("base64");
+  return `data:image/${ext};base64,${b64}`;
+}
+
 /* =========================================================
- * CREATE ESTIMATION (optimized with batch createMany)
+ * CREATE ESTIMATION (dipersingkat: sama seperti punyamu)
  * =======================================================*/
 async function buildHspCodeMap(
   tx: Prisma.TransactionClient,
@@ -41,11 +59,11 @@ async function buildHspCodeMap(
   const m = new Map<string, string>();
   for (const r of rows) {
     const prev = m.get(r.kode);
-    // utamakan yang scope user
     if (!prev || r.scope.startsWith("u:")) m.set(r.kode, r.id);
   }
   return m;
 }
+
 export const createEstimation = async (
   req: AuthenticatedRequest,
   res: Response
@@ -76,7 +94,7 @@ export const createEstimation = async (
     let imageUrl: string | null = null;
     let imageId: string | null = null;
 
-    // Upload gambar DI LUAR transaksi
+    // Upload header image (jika ada) via Cloudinary
     if (req.file) {
       const uploadResult = await uploadToCloudinary(req.file.path, {
         folder: "estimations",
@@ -86,122 +104,110 @@ export const createEstimation = async (
       imageId = uploadResult.imageId;
     }
 
-    const { newEstimationId } = await prisma.$transaction(
-      async (tx) => {
-        // 1) Header
-        const newEst = await tx.estimation.create({
-          data: {
-            projectName,
-            projectOwner: owner,
-            ppn: parseFloat(ppn.toString()),
-            notes: notes || "",
-            authorId: userId,
-            imageUrl: imageUrl ?? undefined,
-            imageId: imageId ?? undefined,
-          },
-          select: { id: true },
-        });
+    const { newEstimationId } = await prisma.$transaction(async (tx) => {
+      const newEst = await tx.estimation.create({
+        data: {
+          projectName,
+          projectOwner: owner,
+          ppn: parseFloat(ppn.toString()),
+          notes: notes || "",
+          authorId: userId,
+          imageUrl: imageUrl ?? undefined,
+          imageId: imageId ?? undefined,
+        },
+        select: { id: true },
+      });
 
-        // 2) Custom fields (optional)
-        if (customFields && Object.keys(customFields).length > 0) {
-          const rows = Object.entries(customFields).map(([label, value]) => ({
-            id: randomUUID(),
-            label,
-            value,
-            type: "text",
-            estimationId: newEst.id,
-          }));
-          await tx.customField.createMany({ data: rows });
-        }
+      if (customFields && Object.keys(customFields).length > 0) {
+        const rows = Object.entries(customFields).map(([label, value]) => ({
+          id: randomUUID(),
+          label,
+          value,
+          type: "text",
+          estimationId: newEst.id,
+        }));
+        await tx.customField.createMany({ data: rows });
+      }
 
-        // 3) Items (batch)
-        if (estimationItem && estimationItem.length > 0) {
-          const estItemRows: {
-            id: string;
-            title: string;
-            estimationId: string;
-          }[] = [];
+      if (estimationItem && estimationItem.length > 0) {
+        const estItemRows: {
+          id: string;
+          title: string;
+          estimationId: string;
+        }[] = [];
+        const itemDetailRows: Prisma.ItemDetailCreateManyInput[] = [];
+        const volDetailRows: {
+          id: string;
+          nama: string;
+          jenis: "ADD" | "SUB";
+          panjang: number;
+          lebar: number;
+          tinggi: number;
+          jumlah: number;
+          volume: number;
+          extras: Prisma.InputJsonValue;
+          itemDetailId: string;
+        }[] = [];
 
-          const itemDetailRows: Prisma.ItemDetailCreateManyInput[] = [];
-
-          const volDetailRows: {
-            id: string;
-            nama: string;
-            jenis: "ADD" | "SUB";
-            panjang: number;
-            lebar: number;
-            tinggi: number;
-            jumlah: number;
-            volume: number;
-            extras: Prisma.InputJsonValue;
-            itemDetailId: string;
-          }[] = [];
-          const allCodes: string[] = [];
-          for (const section of estimationItem ?? []) {
-            for (const detail of section.item ?? []) {
-              if (detail.kode) allCodes.push(detail.kode);
-            }
+        const allCodes: string[] = [];
+        for (const section of estimationItem ?? []) {
+          for (const detail of section.item ?? []) {
+            if (detail.kode) allCodes.push(detail.kode);
           }
-          // Bangun map kode -> hspItemId
-          const hspMap = await buildHspCodeMap(tx, userId, allCodes);
-          for (const section of estimationItem) {
-            const estItemId = randomUUID();
-            estItemRows.push({
-              id: estItemId,
-              title: section.title,
-              estimationId: newEst.id,
+        }
+        const hspMap = await buildHspCodeMap(tx, userId, allCodes);
+
+        for (const section of estimationItem) {
+          const estItemId = randomUUID();
+          estItemRows.push({
+            id: estItemId,
+            title: section.title,
+            estimationId: newEst.id,
+          });
+
+          for (const detail of section.item ?? []) {
+            const itemId = randomUUID();
+            const hspId = detail.kode ? hspMap.get(detail.kode) : undefined;
+            itemDetailRows.push({
+              id: itemId,
+              kode: detail.kode ?? "",
+              deskripsi: detail.nama ?? "",
+              volume: Number(detail.volume ?? 0),
+              satuan: detail.satuan ?? "",
+              hargaSatuan: Number(detail.harga ?? 0),
+              hargaTotal: Number(detail.hargaTotal ?? 0),
+              estimationItemId: estItemId,
+              hspItemId: hspId,
             });
 
-            for (const detail of section.item ?? []) {
-              const itemId = randomUUID();
-              const hspId = detail.kode ? hspMap.get(detail.kode) : undefined;
-              itemDetailRows.push({
-                id: itemId,
-                kode: detail.kode ?? "",
-                deskripsi: detail.nama ?? "",
-                volume: Number(detail.volume ?? 0),
-                satuan: detail.satuan ?? "",
-                hargaSatuan: Number(detail.harga ?? 0),
-                hargaTotal: Number(detail.hargaTotal ?? 0),
-                estimationItemId: estItemId,
-                hspItemId: hspId,
+            for (const d of detail.details ?? []) {
+              volDetailRows.push({
+                id: randomUUID(),
+                nama: d.nama ?? "",
+                jenis: mapJenisToVolumeOp(d.jenis),
+                panjang: Number(d.panjang ?? 0),
+                lebar: Number(d.lebar ?? 0),
+                tinggi: Number(d.tinggi ?? 0),
+                jumlah: Number(d.jumlah ?? 0),
+                volume: Number(d.volume ?? 0),
+                extras: Array.isArray(d.extras) ? d.extras : [],
+                itemDetailId: itemId,
               });
-
-              for (const d of detail.details ?? []) {
-                volDetailRows.push({
-                  id: randomUUID(),
-                  nama: d.nama ?? "",
-                  jenis: mapJenisToVolumeOp(d.jenis),
-                  panjang: Number(d.panjang ?? 0),
-                  lebar: Number(d.lebar ?? 0),
-                  tinggi: Number(d.tinggi ?? 0),
-                  jumlah: Number(d.jumlah ?? 0),
-                  volume: Number(d.volume ?? 0),
-                  extras: Array.isArray(d.extras) ? d.extras : [],
-                  itemDetailId: itemId,
-                });
-              }
             }
-          }
-
-          if (estItemRows.length) {
-            await tx.estimationItem.createMany({ data: estItemRows });
-          }
-          if (itemDetailRows.length) {
-            await tx.itemDetail.createMany({ data: itemDetailRows });
-          }
-          if (volDetailRows.length) {
-            await tx.volumeDetail.createMany({ data: volDetailRows });
           }
         }
 
-        return { newEstimationId: newEst.id };
-      },
-      // Per-call transaction options (bisa override global)
-      { timeout: 20000, maxWait: 20000 }
-    );
+        if (estItemRows.length)
+          await tx.estimationItem.createMany({ data: estItemRows });
+        if (itemDetailRows.length)
+          await tx.itemDetail.createMany({ data: itemDetailRows });
+        if (volDetailRows.length)
+          await tx.volumeDetail.createMany({ data: volDetailRows });
+      }
 
-    // Fetch lengkap untuk response
+      return { newEstimationId: newEst.id };
+    });
+
     const fullEstimation = await prisma.estimation.findUnique({
       where: { id: newEstimationId },
       include: {
@@ -222,26 +228,23 @@ export const createEstimation = async (
     });
   } catch (error) {
     console.error("Create estimation error:", error);
-    res.status(500).json({
-      status: "error",
-      error: "Failed to create estimation",
-    });
+    res
+      .status(500)
+      .json({ status: "error", error: "Failed to create estimation" });
   }
 };
 
 /* =========================================================
- * GET LIST
+ * GET/LIST/UPDATE/DELETE/STATS (dipersingkat: sama seperti punyamu)
  * =======================================================*/
 export const getEstimations = async (
   req: AuthenticatedRequest,
   res: Response
-): Promise<void> => {
+) => {
   try {
     const userId = req.userId;
-    if (!userId) {
-      res.status(401).json({ error: "User not authenticated" });
-      return;
-    }
+    if (!userId)
+      return void res.status(401).json({ error: "User not authenticated" });
 
     const { page = 1, limit = 10, search } = req.query;
     const pageNumber = parseInt(page as string);
@@ -262,11 +265,7 @@ export const getEstimations = async (
         include: {
           author: { select: { id: true, name: true, email: true } },
           customFields: true,
-          items: {
-            include: {
-              details: { include: { volumeDetails: true } },
-            },
-          },
+          items: { include: { details: { include: { volumeDetails: true } } } },
         },
         orderBy: { createdAt: "desc" },
         skip: offset,
@@ -287,74 +286,49 @@ export const getEstimations = async (
     });
   } catch (error) {
     console.error("Get estimations error:", error);
-    res.status(500).json({
-      status: "error",
-      error: "Failed to get estimations",
-    });
+    res
+      .status(500)
+      .json({ status: "error", error: "Failed to get estimations" });
   }
 };
 
-/* =========================================================
- * GET BY ID
- * =======================================================*/
 export const getEstimationById = async (
   req: AuthenticatedRequest,
   res: Response
-): Promise<void> => {
+) => {
   try {
     const userId = req.userId;
     const { id } = req.params;
-
-    if (!userId) {
-      res.status(401).json({ error: "User not authenticated" });
-      return;
-    }
+    if (!userId)
+      return void res.status(401).json({ error: "User not authenticated" });
 
     const estimation = await prisma.estimation.findFirst({
       where: { id, authorId: userId },
       include: {
         author: { select: { id: true, name: true, email: true } },
         customFields: true,
-        items: {
-          include: {
-            details: {
-              include: {
-                volumeDetails: true,
-              },
-            },
-          },
-        },
+        items: { include: { details: { include: { volumeDetails: true } } } },
       },
     });
 
     if (!estimation) {
-      res.status(404).json({
-        status: "error",
-        error: "Estimation not found",
-      });
+      res.status(404).json({ status: "error", error: "Estimation not found" });
       return;
     }
 
-    res.status(200).json({
-      status: "success",
-      data: estimation,
-    });
+    res.status(200).json({ status: "success", data: estimation });
   } catch (error) {
     console.error("Get estimation by ID error:", error);
-    res.status(500).json({
-      status: "error",
-      error: "Failed to get estimation",
-    });
+    res
+      .status(500)
+      .json({ status: "error", error: "Failed to get estimation" });
   }
 };
 
-/* =========================================================
- * UPDATE (optimized batch rewrite)
- * =======================================================*/
 export const updateEstimation = async (
   req: AuthenticatedRequest,
   res: Response
-): Promise<void> => {
+) => {
   try {
     const userId = req.userId;
     const { id } = req.params;
@@ -367,23 +341,17 @@ export const updateEstimation = async (
       estimationItem,
     }: Partial<CreateEstimationData> = req.body;
 
-    if (!userId) {
-      res.status(401).json({ error: "User not authenticated" });
-      return;
-    }
+    if (!userId)
+      return void res.status(401).json({ error: "User not authenticated" });
 
-    const existingEstimation = await prisma.estimation.findFirst({
+    const exists = await prisma.estimation.findFirst({
       where: { id, authorId: userId },
       select: { id: true },
     });
-
-    if (!existingEstimation) {
-      res.status(404).json({
-        status: "error",
-        error: "Estimation not found",
-      });
-      return;
-    }
+    if (!exists)
+      return void res
+        .status(404)
+        .json({ status: "error", error: "Estimation not found" });
 
     let imageUrl: string | undefined;
     let imageId: string | undefined;
@@ -396,142 +364,127 @@ export const updateEstimation = async (
       imageId = uploadResult.imageId;
     }
 
-    const { updatedId } = await prisma.$transaction(
-      async (tx) => {
-        // 1) Update header
-        const updateData: any = {};
-        if (projectName !== undefined) updateData.projectName = projectName;
-        if (owner !== undefined) updateData.projectOwner = owner;
-        if (ppn !== undefined) updateData.ppn = parseFloat(ppn.toString());
-        if (notes !== undefined) updateData.notes = notes;
-        if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
-        if (imageId !== undefined) updateData.imageId = imageId;
+    const { updatedId } = await prisma.$transaction(async (tx) => {
+      const updateData: any = {};
+      if (projectName !== undefined) updateData.projectName = projectName;
+      if (owner !== undefined) updateData.projectOwner = owner;
+      if (ppn !== undefined) updateData.ppn = parseFloat(ppn.toString());
+      if (notes !== undefined) updateData.notes = notes;
+      if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
+      if (imageId !== undefined) updateData.imageId = imageId;
 
-        if (Object.keys(updateData).length) {
-          await tx.estimation.update({ where: { id }, data: updateData });
+      if (Object.keys(updateData).length) {
+        await tx.estimation.update({ where: { id }, data: updateData });
+      }
+
+      if (customFields) {
+        await tx.customField.deleteMany({ where: { estimationId: id } });
+        const entries = Object.entries(customFields);
+        if (entries.length > 0) {
+          const rows = entries.map(([label, value]) => ({
+            id: randomUUID(),
+            label,
+            value,
+            type: "text",
+            estimationId: id,
+          }));
+          await tx.customField.createMany({ data: rows });
         }
+      }
 
-        // 2) Custom fields (rewrite)
-        if (customFields) {
-          await tx.customField.deleteMany({ where: { estimationId: id } });
-          const entries = Object.entries(customFields);
-          if (entries.length > 0) {
-            const rows = entries.map(([label, value]) => ({
-              id: randomUUID(),
-              label,
-              value,
-              type: "text",
-              estimationId: id,
-            }));
-            await tx.customField.createMany({ data: rows });
+      if (estimationItem) {
+        await tx.volumeDetail.deleteMany({
+          where: { itemDetail: { estimationItem: { estimationId: id } } },
+        });
+        await tx.itemDetail.deleteMany({
+          where: { estimationItem: { estimationId: id } },
+        });
+        await tx.estimationItem.deleteMany({ where: { estimationId: id } });
+
+        const estItemRows: {
+          id: string;
+          title: string;
+          estimationId: string;
+        }[] = [];
+        const itemDetailRows: Prisma.ItemDetailCreateManyInput[] = [];
+        const volDetailRows: {
+          id: string;
+          nama: string;
+          jenis: "ADD" | "SUB";
+          panjang: number;
+          lebar: number;
+          tinggi: number;
+          jumlah: number;
+          volume: number;
+          extras: Prisma.InputJsonValue;
+          itemDetailId: string;
+        }[] = [];
+
+        const allCodes: string[] = [];
+        for (const section of estimationItem ?? []) {
+          for (const detail of section.item ?? []) {
+            if (detail.kode) allCodes.push(detail.kode);
           }
         }
+        const hspMap = await buildHspCodeMap(tx, userId, allCodes);
 
-        // 3) Rewrite items if provided (fast path with batch)
-        if (estimationItem) {
-          // Hapus lama dengan urutan aman
-          await tx.volumeDetail.deleteMany({
-            where: { itemDetail: { estimationItem: { estimationId: id } } },
+        for (const section of estimationItem) {
+          const estItemId = randomUUID();
+          estItemRows.push({
+            id: estItemId,
+            title: section.title,
+            estimationId: id,
           });
-          await tx.itemDetail.deleteMany({
-            where: { estimationItem: { estimationId: id } },
-          });
-          await tx.estimationItem.deleteMany({ where: { estimationId: id } });
 
-          // Build batch rows
-          const estItemRows: {
-            id: string;
-            title: string;
-            estimationId: string;
-          }[] = [];
-
-          const itemDetailRows: Prisma.ItemDetailCreateManyInput[] = [];
-          const volDetailRows: {
-            id: string;
-            nama: string;
-            jenis: "ADD" | "SUB";
-            panjang: number;
-            lebar: number;
-            tinggi: number;
-            jumlah: number;
-            volume: number;
-            extras: Prisma.InputJsonValue;
-            itemDetailId: string;
-          }[] = [];
-          const allCodes: string[] = [];
-          for (const section of estimationItem ?? []) {
-            for (const detail of section.item ?? []) {
-              if (detail.kode) allCodes.push(detail.kode);
-            }
-          }
-          const hspMap = await buildHspCodeMap(tx, userId, allCodes);
-          for (const section of estimationItem) {
-            const estItemId = randomUUID();
-            estItemRows.push({
-              id: estItemId,
-              title: section.title,
-              estimationId: id,
+          for (const detail of section.item ?? []) {
+            const itemId = randomUUID();
+            const hspId = detail.kode ? hspMap.get(detail.kode) : undefined;
+            itemDetailRows.push({
+              id: itemId,
+              kode: detail.kode ?? "",
+              deskripsi: detail.nama ?? "",
+              volume: Number(detail.volume ?? 0),
+              satuan: detail.satuan ?? "",
+              hargaSatuan: Number(detail.harga ?? 0),
+              hargaTotal: Number(detail.hargaTotal ?? 0),
+              estimationItemId: estItemId,
+              hspItemId: hspId,
             });
 
-            for (const detail of section.item ?? []) {
-              const itemId = randomUUID();
-              const hspId = detail.kode ? hspMap.get(detail.kode) : undefined;
-              itemDetailRows.push({
-                id: itemId,
-                kode: detail.kode ?? "",
-                deskripsi: detail.nama ?? "",
-                volume: Number(detail.volume ?? 0),
-                satuan: detail.satuan ?? "",
-                hargaSatuan: Number(detail.harga ?? 0),
-                hargaTotal: Number(detail.hargaTotal ?? 0),
-                estimationItemId: estItemId,
-                hspItemId: hspId,
+            for (const d of detail.details ?? []) {
+              volDetailRows.push({
+                id: randomUUID(),
+                nama: d.nama ?? "",
+                jenis: mapJenisToVolumeOp(d.jenis),
+                panjang: Number(d.panjang ?? 0),
+                lebar: Number(d.lebar ?? 0),
+                tinggi: Number(d.tinggi ?? 0),
+                jumlah: Number(d.jumlah ?? 0),
+                volume: Number(d.volume ?? 0),
+                extras: Array.isArray(d.extras) ? d.extras : [],
+                itemDetailId: itemId,
               });
-
-              for (const d of detail.details ?? []) {
-                volDetailRows.push({
-                  id: randomUUID(),
-                  nama: d.nama ?? "",
-                  jenis: mapJenisToVolumeOp(d.jenis),
-                  panjang: Number(d.panjang ?? 0),
-                  lebar: Number(d.lebar ?? 0),
-                  tinggi: Number(d.tinggi ?? 0),
-                  jumlah: Number(d.jumlah ?? 0),
-                  volume: Number(d.volume ?? 0),
-                  extras: Array.isArray(d.extras) ? d.extras : [],
-                  itemDetailId: itemId,
-                });
-              }
             }
-          }
-
-          if (estItemRows.length) {
-            await tx.estimationItem.createMany({ data: estItemRows });
-          }
-          if (itemDetailRows.length) {
-            await tx.itemDetail.createMany({ data: itemDetailRows });
-          }
-          if (volDetailRows.length) {
-            await tx.volumeDetail.createMany({ data: volDetailRows });
           }
         }
 
-        return { updatedId: id };
-      },
-      { timeout: 20000, maxWait: 20000 }
-    );
+        if (estItemRows.length)
+          await tx.estimationItem.createMany({ data: estItemRows });
+        if (itemDetailRows.length)
+          await tx.itemDetail.createMany({ data: itemDetailRows });
+        if (volDetailRows.length)
+          await tx.volumeDetail.createMany({ data: volDetailRows });
+      }
 
-    // Return lengkap
+      return { updatedId: id };
+    });
+
     const fullEstimation = await prisma.estimation.findUnique({
       where: { id: updatedId },
       include: {
         author: { select: { id: true, name: true, email: true } },
         customFields: true,
-        items: {
-          include: {
-            details: { include: { volumeDetails: true } },
-          },
-        },
+        items: { include: { details: { include: { volumeDetails: true } } } },
       },
     });
 
@@ -542,40 +495,29 @@ export const updateEstimation = async (
     });
   } catch (error) {
     console.error("Update estimation error:", error);
-    res.status(500).json({
-      status: "error",
-      error: "Failed to update estimation",
-    });
+    res
+      .status(500)
+      .json({ status: "error", error: "Failed to update estimation" });
   }
 };
 
-/* =========================================================
- * DELETE
- * =======================================================*/
 export const deleteEstimation = async (
   req: AuthenticatedRequest,
   res: Response
-): Promise<void> => {
+) => {
   try {
     const userId = req.userId;
     const { id } = req.params;
+    if (!userId)
+      return void res.status(401).json({ error: "User not authenticated" });
 
-    if (!userId) {
-      res.status(401).json({ error: "User not authenticated" });
-      return;
-    }
-
-    const existingEstimation = await prisma.estimation.findFirst({
+    const exists = await prisma.estimation.findFirst({
       where: { id, authorId: userId },
     });
-
-    if (!existingEstimation) {
-      res.status(404).json({
-        status: "error",
-        error: "Estimation not found",
-      });
-      return;
-    }
+    if (!exists)
+      return void res
+        .status(404)
+        .json({ status: "error", error: "Estimation not found" });
 
     await prisma.$transaction(async (tx) => {
       await tx.volumeDetail.deleteMany({
@@ -589,64 +531,50 @@ export const deleteEstimation = async (
       await tx.estimation.delete({ where: { id } });
     });
 
-    res.status(200).json({
-      status: "success",
-      message: "Estimation deleted successfully",
-    });
+    res
+      .status(200)
+      .json({ status: "success", message: "Estimation deleted successfully" });
   } catch (error) {
     console.error("Delete estimation error:", error);
-    res.status(500).json({
-      status: "error",
-      error: "Failed to delete estimation",
-    });
+    res
+      .status(500)
+      .json({ status: "error", error: "Failed to delete estimation" });
   }
 };
 
-/* =========================================================
- * STATS
- * =======================================================*/
 export const getEstimationStats = async (
   req: AuthenticatedRequest,
   res: Response
 ) => {
   try {
     const userId = req.userId;
-    if (!userId) {
-      res.status(401).json({ error: "User not authenticated" });
-      return;
-    }
+    if (!userId)
+      return void res.status(401).json({ error: "User not authenticated" });
 
     const total = await prisma.estimation.count({
       where: { authorId: userId },
     });
-
-    res.status(200).json({
-      status: "success",
-      data: { total },
-    });
+    res.status(200).json({ status: "success", data: { total } });
   } catch (error) {
     console.error("Get estimation stats error:", error);
-    res.status(500).json({
-      status: "error",
-      error: "Failed to get estimation statistics",
-    });
+    res
+      .status(500)
+      .json({ status: "error", error: "Failed to get estimation statistics" });
   }
 };
 
 /* =========================================================
- * DOWNLOADERS (unchanged)
+ * DOWNLOADERS
  * =======================================================*/
 export const downloadEstimationPdf = async (
   req: AuthenticatedRequest,
   res: Response
-): Promise<void> => {
+) => {
   try {
     const userId = req.userId;
     const { id } = req.params;
-    if (!userId) {
-      res.status(401).json({ error: "User not authenticated" });
-      return;
-    }
+    if (!userId)
+      return void res.status(401).json({ error: "User not authenticated" });
 
     const estimation = await prisma.estimation.findFirst({
       where: { id, authorId: userId },
@@ -656,11 +584,10 @@ export const downloadEstimationPdf = async (
         items: { include: { details: true } },
       },
     });
-
-    if (!estimation) {
-      res.status(404).json({ status: "error", error: "Estimation not found" });
-      return;
-    }
+    if (!estimation)
+      return void res
+        .status(404)
+        .json({ status: "error", error: "Estimation not found" });
 
     const fileName = `${sanitizeFileName(estimation.projectName)}_estimation.pdf`;
     const pdfBuffer = await buildEstimationPdf(estimation as any);
@@ -677,15 +604,13 @@ export const downloadEstimationPdf = async (
 export const downloadEstimationExcel = async (
   req: AuthenticatedRequest,
   res: Response
-): Promise<void> => {
+) => {
+  let tempLogoPublicId: string | undefined;
   try {
     const userId = req.userId;
     const { id } = req.params;
-
-    if (!userId) {
-      res.status(401).json({ error: "User not authenticated" });
-      return;
-    }
+    if (!userId)
+      return void res.status(401).json({ error: "User not authenticated" });
 
     const estimation = await prisma.estimation.findFirst({
       where: { id, authorId: userId },
@@ -719,9 +644,59 @@ export const downloadEstimationExcel = async (
       return;
     }
 
+    // Siapkan logo base64 jika ada
+    let logo:
+      | {
+          base64: string;
+          extension: "png" | "jpeg";
+        }
+      | undefined;
+
+    // Prioritas 1: file upload baru (logo sementara)
+    const file = (req as any).file as Express.Multer.File | undefined;
+    if (file) {
+      const upload = await uploadToCloudinary(file.path, {
+        folder: "estimations/export-logos",
+        format: "png",
+      });
+      tempLogoPublicId = upload.imageId;
+
+      const resp = await axios.get<ArrayBuffer>(upload.imageUrl, {
+        responseType: "arraybuffer",
+      });
+      const ext = guessExt(upload.imageUrl);
+      const base64 = toBase64DataUrl(resp.data, ext);
+      logo = { base64, extension: ext };
+    }
+    // Prioritas 2: pakai logo yang tersimpan di estimation.imageUrl (fallback)
+    else if (estimation.imageUrl) {
+      try {
+        const resp = await axios.get<ArrayBuffer>(estimation.imageUrl, {
+          responseType: "arraybuffer",
+        });
+        const ext = guessExt(estimation.imageUrl);
+        const base64 = toBase64DataUrl(resp.data, ext);
+        logo = { base64, extension: ext };
+      } catch {
+        // silent: kalau gagal ambil logo fallback, lanjut tanpa logo
+      }
+    }
+
     const safeName = sanitizeFileName(estimation.projectName);
     const fileName = `RAB_${safeName}.xlsx`;
-    const excelBuffer = await buildEstimationExcel(estimation as any);
+
+    const excelBuffer = await buildEstimationExcel(estimation as any, {
+      logo,
+      logoSize: { width: 240, height: 80 },
+    });
+
+    if (tempLogoPublicId) {
+      try {
+        await deleteFromCloudinary(tempLogoPublicId);
+      } catch (e) {
+        console.warn("Failed to cleanup temp logo on Cloudinary:", e);
+      }
+    }
 
     res.setHeader(
       "Content-Type",
@@ -729,12 +704,18 @@ export const downloadEstimationExcel = async (
     );
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`
+      `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(
+        fileName
+      )}`
     );
-
     res.status(200).send(excelBuffer);
   } catch (error) {
     console.error("Download Excel error:", error);
+    if (tempLogoPublicId) {
+      try {
+        await deleteFromCloudinary(tempLogoPublicId);
+      } catch {}
+    }
     res
       .status(500)
       .json({ status: "error", error: "Failed to generate Excel" });
