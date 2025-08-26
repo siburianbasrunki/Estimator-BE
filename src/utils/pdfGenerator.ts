@@ -1,12 +1,15 @@
-import PDFDocument from "pdfkit";
+// src/utils/pdfGenerator.ts
+import PdfPrinter from "pdfmake";
 import dayjs from "dayjs";
-import {
+import path from "path";
+import type {
   Estimation,
   EstimationItem,
   ItemDetail,
   CustomField,
   User,
 } from "@prisma/client";
+import { calcTotals } from "./exportHelpers";
 
 type EstimationWithRelations = Estimation & {
   author: Pick<User, "id" | "name" | "email">;
@@ -14,408 +17,159 @@ type EstimationWithRelations = Estimation & {
   items: (EstimationItem & { details: ItemDetail[] })[];
 };
 
-const MARGIN = 32; // lebih rapat
-const PAGE_WIDTH = 595.28; // A4 width pt
-const CONTENT_WIDTH = PAGE_WIDTH - MARGIN * 2;
-
-const COLORS = {
-  headerFrom: "#0B1220",
-  headerTo: "#0F172A",
-  headerText: "#F8FAFC",
-  primary: "#0F52BA", // cerah, modern
-  accent: "#1D4ED8",
-  text: "#111827",
-  subText: "#374151",
-  border: "#E5E7EB",
-  grid: "#EEF2F7",
-  zebra: "#FAFBFF",
-  sectionBg: "#F3F4F6",
-  chipBg: "#EEF2FF",
-  chipBorder: "#C7D2FE",
+type LogoOpt = { dataUrl: string; width?: number; height?: number };
+type OrgOpt = {
+  name?: string;
+  address?: string;
+  phone?: string;
+  email?: string;
+  website?: string;
 };
 
-const FONTS = {
-  title: "Helvetica-Bold",
-  header: "Helvetica-Bold",
-  body: "Helvetica",
+export type BuildPdfOptions = {
+  logo?: LogoOpt;
+  org?: OrgOpt;
+  landscape?: boolean;
+  titleOverride?: string;
 };
 
-const COLS = [
-  { key: "no", label: "No", width: 30, align: "center" as const },
-  {
-    key: "uraian",
-    label: "Uraian Pekerjaan",
-    width: 278,
-    align: "left" as const,
-  },
-  { key: "satuan", label: "Satuan", width: 52, align: "center" as const },
-  { key: "volume", label: "Volume", width: 62, align: "right" as const },
-  {
-    key: "hargaSatuan",
-    label: "Satuan (Rp)",
-    width: 86,
-    align: "right" as const,
-  },
-  { key: "jumlah", label: "Jumlah (Rp)", width: 86, align: "right" as const },
-] as const;
-
-const COL_GAP = 6;
-
-const fmtIDR = (n: number) => `Rp${Math.round(n).toLocaleString("id-ID")}`;
-
-function cellX(colIndex: number): number {
-  let x = MARGIN;
-  for (let i = 0; i < colIndex; i++) x += COLS[i].width + COL_GAP;
-  return x;
-}
-
-function drawGridRect(doc: PDFKit.PDFDocument, y: number, h: number) {
-  // grid borders vertikal tipis
-  let x = MARGIN;
-  doc
-    .lineWidth(0.5)
-    .strokeColor(COLORS.grid)
-    .moveTo(MARGIN, y + h)
-    .lineTo(MARGIN + CONTENT_WIDTH, y + h)
-    .stroke();
-
-  for (let i = 0; i < COLS.length - 1; i++) {
-    x += COLS[i].width + COL_GAP;
-    doc
-      .moveTo(x - COL_GAP / 2, y)
-      .lineTo(x - COL_GAP / 2, y + h)
-      .stroke();
-  }
-}
-
-function ensureSpace(
-  doc: PDFKit.PDFDocument,
-  needed: number,
-  redraw?: () => void
-) {
-  const bottom = doc.page.margins.bottom ?? MARGIN;
-  const available = doc.page.height - bottom - doc.y;
-  if (available < needed) {
-    doc.addPage();
-    if (redraw) redraw();
-  }
-}
-
+// Helper
 const roman = (n: number) => {
   const map: [number, string][] = [
-    [1000, "M"],
-    [900, "CM"],
-    [500, "D"],
-    [400, "CD"],
-    [100, "C"],
-    [90, "XC"],
-    [50, "L"],
-    [40, "XL"],
-    [10, "X"],
-    [9, "IX"],
-    [5, "V"],
-    [4, "IV"],
-    [1, "I"],
+    [1000, "M"], [900, "CM"], [500, "D"], [400, "CD"],
+    [100, "C"], [90, "XC"], [50, "L"], [40, "XL"],
+    [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"],
   ];
-  let r = "",
-    x = Math.max(1, Math.floor(n));
-  for (const [v, s] of map)
-    while (x >= v) {
-      r += s;
-      x -= v;
-    }
+  let r = "", x = Math.max(1, Math.floor(n));
+  for (const [v, s] of map) while (x >= v) { r += s; x -= v; }
   return r;
 };
+const idr = (n: number) =>
+  new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 })
+    .format(Number(n || 0));
 
-// ===== Header dokumen =====
-function drawDocHeader(doc: PDFKit.PDFDocument, est: EstimationWithRelations) {
-  // gradien sederhana (dua strip)
-  doc.rect(0, 0, doc.page.width, 70).fillColor(COLORS.headerFrom).fill();
-  doc.rect(0, 35, doc.page.width, 35).fillColor(COLORS.headerTo).fill();
+// Printer pakai built-in Helvetica
+const fonts = { Helvetica: { normal: "Helvetica", bold: "Helvetica-Bold", italics: "Helvetica-Oblique", bolditalics: "Helvetica-BoldOblique" } };
+const printer = new PdfPrinter(fonts);
 
-  doc
-    .fillColor(COLORS.headerText)
-    .font(FONTS.title)
-    .fontSize(18)
-    .text(est.projectName, MARGIN, 16, { width: CONTENT_WIDTH });
-
-  doc
-    .font(FONTS.body)
-    .fontSize(10)
-    .fillColor("#D1D5DB")
-    .text(
-      `Owner: ${est.projectOwner}   •   Status: ${est.status}   •   PPN: ${est.ppn}%`,
-      MARGIN,
-      42,
-      { width: CONTENT_WIDTH }
-    )
-    .text(
-      `Dibuat: ${dayjs(est.createdAt).format("DD MMM YYYY HH:mm")}   •   Diupdate: ${dayjs(
-        est.updatedAt
-      ).format("DD MMM YYYY HH:mm")}`,
-      MARGIN,
-      56,
-      { width: CONTENT_WIDTH }
-    );
-
-  doc.y = 82;
-}
-
-// ===== Header tabel (2 baris) =====
-function drawTableHeader(doc: PDFKit.PDFDocument) {
-  const topY = doc.y;
-  const h1 = 20;
-  const h2 = 20;
-
-  ensureSpace(doc, h1 + h2 + 4);
-
-  // Baris 1
-  doc
-    .roundedRect(MARGIN, topY, CONTENT_WIDTH, h1, 6)
-    .fillAndStroke(COLORS.accent, COLORS.accent);
-
-  const labels1 = [
-    "No",
-    "Uraian Pekerjaan",
-    "Satuan",
-    "Volume",
-    "Harga (Rp)",
-    "",
-  ];
-  COLS.forEach((c, i) => {
-    const x = cellX(i) + 6;
-    const w = c.width - 12;
-    doc
-      .fillColor("#FFFFFF")
-      .font(FONTS.header)
-      .fontSize(10)
-      .text(labels1[i], x, topY + 5, { width: w, align: "center" });
-  });
-
-  // Baris 2
-  const y2 = topY + h1 - 2; // sedikit overlap agar terlihat menyatu
-  doc
-    .roundedRect(MARGIN, y2, CONTENT_WIDTH, h2, 6)
-    .fillAndStroke(COLORS.accent, COLORS.accent);
-
-  const labels2 = ["", "", "", "", "Satuan (Rp)", "Jumlah (Rp)"];
-  COLS.forEach((c, i) => {
-    if (!labels2[i]) return;
-    const x = cellX(i) + 6;
-    const w = c.width - 12;
-    doc
-      .fillColor("#FFFFFF")
-      .font(FONTS.header)
-      .fontSize(10)
-      .text(labels2[i], x, y2 + 5, { width: w, align: "center" });
-  });
-
-  doc.y = y2 + h2 + 4;
-}
-
-// ===== Judul bagian =====
-function drawSectionTitle(
-  doc: PDFKit.PDFDocument,
-  index: number,
-  title: string
-) {
-  const h = 22;
-  ensureSpace(doc, h + 8, () => drawTableHeader(doc));
-
-  // pill light
-  doc
-    .roundedRect(MARGIN, doc.y, CONTENT_WIDTH, h, 8)
-    .fillAndStroke(COLORS.sectionBg, COLORS.border);
-
-  doc
-    .font(FONTS.header)
-    .fontSize(11)
-    .fillColor(COLORS.primary)
-    .text(`${roman(index)}  ${title.toUpperCase()}`, MARGIN + 10, doc.y + 5);
-
-  doc.y += h + 4;
-}
-
-// ===== Baris item =====
-function drawItemRow(
-  doc: PDFKit.PDFDocument,
-  rowIdx: number,
-  data: {
-    no: number;
-    uraian: string;
-    satuan: string;
-    volume: number | string;
-    hargaSatuan: number;
-    jumlah: number;
-  }
-) {
-  const padY = 6;
-  const padX = 6;
-
-  const uraianIdx = 1;
-  const uraianW = COLS[uraianIdx].width - padX * 2;
-  const uraianH = doc.heightOfString(String(data.uraian ?? ""), {
-    width: uraianW,
-  });
-
-  const baseH = 18; // lebih ringkas
-  const rowH = Math.max(baseH, uraianH + padY * 2);
-
-  ensureSpace(doc, rowH + 6, () => drawTableHeader(doc));
-
-  if (rowIdx % 2 === 1) {
-    doc.rect(MARGIN, doc.y, CONTENT_WIDTH, rowH).fillColor(COLORS.zebra).fill();
-  }
-
-  drawGridRect(doc, doc.y, rowH);
-
-  COLS.forEach((c, i) => {
-    const x = cellX(i) + padX;
-    const w = c.width - padX * 2;
-    let txt = "";
-
-    switch (c.key) {
-      case "no":
-        txt = String(data.no ?? "");
-        break;
-      case "uraian":
-        txt = String(data.uraian ?? "");
-        break;
-      case "satuan":
-        txt = String(data.satuan ?? "");
-        break;
-      case "volume":
-        txt =
-          data.volume !== undefined && data.volume !== null
-            ? String(data.volume)
-            : "";
-        break;
-      case "hargaSatuan":
-        txt = fmtIDR(data.hargaSatuan ?? 0);
-        break;
-      case "jumlah":
-        txt = fmtIDR(data.jumlah ?? 0);
-        break;
-    }
-
-    doc
-      .font(FONTS.body)
-      .fontSize(10)
-      .fillColor(COLORS.text)
-      .text(txt, x, doc.y + padY, { width: w, align: c.align });
-  });
-
-  doc.y += rowH;
-}
-
-// ===== Subtotal per bagian =====
-function drawSectionSubtotal(
-  doc: PDFKit.PDFDocument,
-  romanIdx: string,
-  subtotal: number
-) {
-  const h = 26;
-  ensureSpace(doc, h + 6, () => drawTableHeader(doc));
-
-  // label kanan
-  const label = `Jumlah ${romanIdx}`;
-  const labelW = 170;
-
-  doc
-    .font(FONTS.header)
-    .fontSize(10)
-    .fillColor(COLORS.subText)
-    .text(label, MARGIN + CONTENT_WIDTH - (labelW + 96), doc.y + 6, {
-      width: labelW,
-      align: "right",
-    });
-
-  // badge nilai
-  doc
-    .roundedRect(MARGIN + CONTENT_WIDTH - 96, doc.y + 3, 96, 20, 7)
-    .fillAndStroke(COLORS.chipBg, COLORS.chipBorder);
-
-  doc
-    .font(FONTS.header)
-    .fontSize(10.5)
-    .fillColor(COLORS.primary)
-    .text(fmtIDR(subtotal), MARGIN + CONTENT_WIDTH - 96 + 8, doc.y + 6, {
-      width: 96 - 16,
-      align: "right",
-    });
-
-  doc.y += h;
-}
-
-// ====== MAIN ======
 export async function buildEstimationPdf(
-  est: EstimationWithRelations
+  est: EstimationWithRelations,
+  opts?: BuildPdfOptions
 ): Promise<Buffer> {
-  const doc = new PDFDocument({
-    margin: MARGIN,
-    size: "A4",
-    bufferPages: true,
-    info: {
-      Title: `RAB ${est.projectName}`,
-      Author: est.author?.name || "Estimation App",
-      CreationDate: new Date(),
+  const landscape = opts?.landscape ?? true;
+  const title = opts?.titleOverride ?? "Rencana Anggaran Biaya";
+
+  // Kop header
+  const kop = {
+    columns: [
+      opts?.logo?.dataUrl
+        ? { image: opts.logo.dataUrl, width: opts.logo.width ?? 90, height: opts.logo.height ?? 30 }
+        : { text: "" },
+      {
+        stack: [
+          { text: opts?.org?.name ?? "", bold: true, fontSize: 12 },
+          { text: opts?.org?.address ?? "", fontSize: 9 },
+          { text: opts?.org?.phone ?? "", fontSize: 9 },
+          { text: opts?.org?.email ?? "", fontSize: 9 },
+          { text: opts?.org?.website ?? "", fontSize: 9 },
+        ],
+        alignment: "right",
+      },
+    ],
+  };
+
+  // Info proyek
+  const infoRows = [
+    ["Nama Proyek", est.projectName],
+    ["Pemilik Proyek", est.projectOwner],
+    ["PPN", `${est.ppn}%`],
+    ["Status", est.status],
+    ["Dibuat", dayjs(est.createdAt).format("DD MMM YYYY HH:mm")],
+    ["Diupdate", dayjs(est.updatedAt).format("DD MMM YYYY HH:mm")],
+    ["Catatan", est.notes || "-"],
+  ];
+
+  const infoTable = {
+    table: {
+      widths: ["30%", "70%"],
+      body: infoRows.map(([a, b]) => [{ text: a, bold: true }, String(b)]),
     },
-  });
+    margin: [0, 10, 0, 10],
+  };
 
-  const chunks: Buffer[] = [];
-  doc.on("data", (c) => chunks.push(c));
-  const done = new Promise<Buffer>((resolve) =>
-    doc.on("end", () => resolve(Buffer.concat(chunks)))
-  );
+  // Tabel RAB
+  const body: any[] = [
+    [
+      { text: "No", style: "th", rowSpan: 2 },
+      { text: "Uraian Pekerjaan", style: "th", rowSpan: 2 },
+      { text: "Satuan", style: "th", rowSpan: 2 },
+      { text: "Volume", style: "th", rowSpan: 2 },
+      { text: "Harga (Rp)", style: "th", colSpan: 2 }, {},
+    ],
+    ["", "", "", "", { text: "Satuan (Rp)", style: "th" }, { text: "Jumlah (Rp)", style: "th" }],
+  ];
 
-  // Header
-  drawDocHeader(doc, est);
-
-  // Header tabel global
-  drawTableHeader(doc);
-
-  // Render tiap section
   est.items.forEach((section, sIdx) => {
-    drawSectionTitle(doc, sIdx + 1, section.title || `Bagian ${sIdx + 1}`);
-
-    let no = 1;
-    let subtotal = 0;
-
-    (section.details || []).forEach((d, idx) => {
-      const volume = d.volume ?? "";
-      const hargaSatuan = d.hargaSatuan ?? 0;
-      const jumlah =
-        d.hargaTotal ?? Number(d.volume || 0) * Number(d.hargaSatuan || 0);
-
-      drawItemRow(doc, idx, {
-        no: no++,
-        uraian: d.deskripsi || "",
-        satuan: d.satuan || "",
-        volume,
-        hargaSatuan,
-        jumlah,
-      });
-
-      subtotal += Number(jumlah || 0);
+    body.push([{ text: `${roman(sIdx + 1)} ${section.title.toUpperCase()}`, colSpan: 6, bold: true, fillColor: "#E0F2FE" }, {}, {}, {}, {}, {}]);
+    let no = 1; let subtotal = 0;
+    (section.details || []).forEach((d) => {
+      const jumlah = Number(d.hargaTotal ?? (Number(d.volume) * Number(d.hargaSatuan))) || 0;
+      subtotal += jumlah;
+      body.push([
+        { text: String(no++), alignment: "center" },
+        d.deskripsi || "-",
+        d.satuan || "-",
+        String(d.volume || 0),
+        { text: idr(Number(d.hargaSatuan || 0)), alignment: "right" },
+        { text: idr(jumlah), alignment: "right" },
+      ]);
     });
-
-    drawSectionSubtotal(doc, roman(sIdx + 1), subtotal);
+    body.push([
+      { text: "", colSpan: 4 }, {}, {}, {},
+      { text: `Jumlah ${roman(sIdx + 1)}`, bold: true, alignment: "right" },
+      { text: idr(subtotal), bold: true, alignment: "right" },
+    ]);
   });
 
-  // Nomor halaman
-  const range = doc.bufferedPageRange();
-  for (let i = range.start; i < range.start + range.count; i++) {
-    doc.switchToPage(i);
-    doc
-      .font(FONTS.body)
-      .fontSize(8)
-      .fillColor("#6B7280")
-      .text(`Hal ${i + 1} dari ${range.count}`, 0, doc.page.height - 22, {
-        width: doc.page.width,
-        align: "center",
-      });
-  }
+  const { subtotal, ppnAmount, grandTotal } = calcTotals(est as any);
 
-  doc.end();
-  return done;
+  const ringkasan = {
+    table: {
+      widths: ["60%", "40%"],
+      body: [
+        [{ text: "Ringkasan Biaya", colSpan: 2, bold: true, fillColor: "#E0F2FE" }, {}],
+        ["Subtotal", { text: idr(subtotal), alignment: "right" }],
+        [`PPN (${est.ppn}%)`, { text: idr(ppnAmount), alignment: "right" }],
+        [{ text: "Grand Total", bold: true }, { text: idr(grandTotal), bold: true, alignment: "right" }],
+      ],
+    },
+    margin: [0, 10, 0, 0],
+  };
+
+  const docDefinition: any = {
+    pageSize: "A4",
+    pageOrientation: landscape ? "landscape" : "portrait",
+    pageMargins: [36, 80, 36, 48],
+    header: [kop, { canvas: [{ type: "line", x1: 0, y1: 0, x2: 760, y2: 0, lineWidth: 1 }] }, { text: title, alignment: "center", bold: true, margin: [0, 8] }],
+    footer: (current: number, total: number) =>
+      ({ columns: [{ text: dayjs().format("DD MMM YYYY HH:mm"), fontSize: 8 }, { text: `Hal. ${current}/${total}`, alignment: "right", fontSize: 8 }], margin: [36, 0, 36, 20] }),
+    content: [
+      infoTable,
+      { table: { headerRows: 2, widths: [25, "*", 50, 50, 80, 90], body }, layout: "lightHorizontalLines" },
+      ringkasan,
+    ],
+    styles: {
+      th: { bold: true, color: "white", fillColor: "#0284C7", alignment: "center" },
+    },
+    defaultStyle: { font: "Helvetica", fontSize: 9 },
+  };
+
+  const pdfDoc = printer.createPdfKitDocument(docDefinition);
+  const chunks: Buffer[] = [];
+  return await new Promise((resolve, reject) => {
+    pdfDoc.on("data", (d) => chunks.push(d));
+    pdfDoc.on("end", () => resolve(Buffer.concat(chunks)));
+    pdfDoc.on("error", reject);
+    pdfDoc.end();
+  });
 }

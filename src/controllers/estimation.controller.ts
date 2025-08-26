@@ -566,40 +566,6 @@ export const getEstimationStats = async (
 /* =========================================================
  * DOWNLOADERS
  * =======================================================*/
-export const downloadEstimationPdf = async (
-  req: AuthenticatedRequest,
-  res: Response
-) => {
-  try {
-    const userId = req.userId;
-    const { id } = req.params;
-    if (!userId)
-      return void res.status(401).json({ error: "User not authenticated" });
-
-    const estimation = await prisma.estimation.findFirst({
-      where: { id, authorId: userId },
-      include: {
-        author: { select: { id: true, name: true, email: true } },
-        customFields: true,
-        items: { include: { details: true } },
-      },
-    });
-    if (!estimation)
-      return void res
-        .status(404)
-        .json({ status: "error", error: "Estimation not found" });
-
-    const fileName = `${sanitizeFileName(estimation.projectName)}_estimation.pdf`;
-    const pdfBuffer = await buildEstimationPdf(estimation as any);
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-    res.status(200).send(pdfBuffer);
-  } catch (error) {
-    console.error("Download PDF error:", error);
-    res.status(500).json({ status: "error", error: "Failed to generate PDF" });
-  }
-};
 
 export const downloadEstimationExcel = async (
   req: AuthenticatedRequest,
@@ -719,5 +685,104 @@ export const downloadEstimationExcel = async (
     res
       .status(500)
       .json({ status: "error", error: "Failed to generate Excel" });
+  }
+};
+
+export const downloadEstimationPdf = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  let tempLogoPublicId: string | undefined;
+  try {
+    const userId = req.userId;
+    const { id } = req.params;
+
+    if (!userId) {
+      return void res
+        .status(401)
+        .json({ status: "error", error: "User not authenticated" });
+    }
+
+    const estimation = await prisma.estimation.findFirst({
+      where: { id, authorId: userId },
+      include: {
+        author: { select: { id: true, name: true, email: true } },
+        customFields: true,
+        items: { include: { details: true } },
+      },
+    });
+
+    if (!estimation) {
+      return void res
+        .status(404)
+        .json({ status: "error", error: "Estimation not found" });
+    }
+
+    // --- Siapkan logo (upload → dataURL) ---
+    let logoDataUrl: string | undefined;
+
+    // Prioritas 1: file upload "logo"
+    const file = (req as any).file as Express.Multer.File | undefined;
+    if (file) {
+      const up = await uploadToCloudinary(file.path, {
+        folder: "estimations/export-logos",
+        format: "png",
+      });
+      tempLogoPublicId = up.imageId;
+
+      const resp = await axios.get<ArrayBuffer>(up.imageUrl, {
+        responseType: "arraybuffer",
+      });
+      const ext = guessExt(up.imageUrl);
+      logoDataUrl = toBase64DataUrl(resp.data, ext);
+    }
+    // Prioritas 2: estimation.imageUrl (fallback)
+    else if (estimation.imageUrl) {
+      try {
+        const resp = await axios.get<ArrayBuffer>(estimation.imageUrl, {
+          responseType: "arraybuffer",
+        });
+        const ext = guessExt(estimation.imageUrl);
+        logoDataUrl = toBase64DataUrl(resp.data, ext);
+      } catch {
+        // fallback gagal → jalan tanpa logo
+      }
+    }
+
+    const safeName = sanitizeFileName(estimation.projectName);
+    const fileName = `RAB_${safeName}.pdf`;
+
+    const pdfBuffer = await buildEstimationPdf(estimation as any, {
+      logo: logoDataUrl
+        ? { dataUrl: logoDataUrl, width: 110, height: 36 }
+        : undefined,
+      // isi identitas organisasi di sini jika perlu tampil di kop:
+      // org: { name: "...", address: "...", phone: "...", email: "...", website: "..." },
+      landscape: true,
+      titleOverride: "Rencana Anggaran Biaya",
+    });
+
+    if (tempLogoPublicId) {
+      try {
+        await deleteFromCloudinary(tempLogoPublicId);
+      } catch (e) {
+        console.warn("Cleanup temp logo failed:", e);
+      }
+    }
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`
+    );
+    res.status(200).send(pdfBuffer);
+  } catch (error) {
+    console.error("Download PDF error:", error);
+    if (tempLogoPublicId) {
+      try {
+        await deleteFromCloudinary(tempLogoPublicId);
+      } catch {}
+    }
+    res.status(500).json({ status: "error", error: "Failed to generate PDF" });
   }
 };

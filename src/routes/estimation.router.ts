@@ -34,7 +34,12 @@ router.patch("/:id", upload.single("image"), updateEstimation);
 router.delete("/:id", deleteEstimation);
 
 router.get("/:id/download/pdf", downloadEstimationPdf);
+router.post("/:id/download/pdf", upload.single("logo"), downloadEstimationPdf);
 
 router.get("/:id/download/excel", downloadEstimationExcel);
-router.post("/:id/download/excel", upload.single("logo"), downloadEstimationExcel);
+router.post(
+  "/:id/download/excel",
+  upload.single("logo"),
+  downloadEstimationExcel
+);
 export default router;
