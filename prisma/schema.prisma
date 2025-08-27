@@ -1,0 +1,258 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["debian-openssl-3.0.x", "native"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+/**
+ * =========================
+ * USER & ESTIMATION DOMAIN
+ * =========================
+ */
+
+model User {
+  id          String    @id @default(uuid())
+  name        String
+  email       String    @unique
+  role        Role      @default(USER)
+  imageUrl    String?
+  imageId     String?
+  phoneNumber String?
+  otp         String?
+  otpExpiry   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  estimations Estimation[]
+
+  @@map("users")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum VolumeOp {
+  ADD
+  SUB
+}
+
+model Estimation {
+  id           String   @id @default(uuid())
+  projectName  String
+  projectOwner String
+  ppn          Float
+  notes        String?
+  status       String   @default("Submitted")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  author   User    @relation(fields: [authorId], references: [id])
+  authorId String
+  imageUrl String?
+  imageId  String?
+
+  items        EstimationItem[]
+  customFields CustomField[]
+
+  @@map("estimations")
+}
+
+model EstimationItem {
+  id    String @id @default(uuid())
+  title String
+
+  estimation   Estimation @relation(fields: [estimationId], references: [id])
+  estimationId String
+
+  details ItemDetail[]
+
+  @@map("estimation_items")
+}
+
+model ItemDetail {
+  id          String @id @default(uuid())
+  kode        String
+  deskripsi   String
+  volume      Float
+  satuan      String
+  hargaSatuan Float
+  hargaTotal  Float
+
+  estimationItem   EstimationItem @relation(fields: [estimationItemId], references: [id])
+  estimationItemId String
+
+  hspItem   HSPItem? @relation(fields: [hspItemId], references: [id], onDelete: SetNull)
+  hspItemId String?
+
+  volumeDetails VolumeDetail[]
+
+  @@map("item_details")
+}
+
+model VolumeDetail {
+  id      String   @id @default(uuid())
+  nama    String
+  jenis   VolumeOp
+  panjang Float
+  lebar   Float
+  tinggi  Float
+  jumlah  Float
+  volume  Float
+  extras  Json?
+
+  itemDetail   ItemDetail @relation(fields: [itemDetailId], references: [id])
+  itemDetailId String
+
+  @@map("volume_details")
+}
+
+model CustomField {
+  id    String @id @default(uuid())
+  label String
+  value String
+  type  String
+
+  estimation   Estimation @relation(fields: [estimationId], references: [id])
+  estimationId String
+
+  @@map("custom_fields")
+}
+
+/**
+ * =========================
+ * HSP MASTER & AHSP RECIPE
+ * =========================
+ * Scoped + copy-on-write
+ */
+
+model HSPCategory {
+  id    String    @id @default(uuid())
+  scope String    @default("GLOBAL") // "GLOBAL" or "u:<userId>"
+  name  String
+  items HSPItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([scope, name], name: "scope_name_unique")
+  @@map("hsp_categories")
+}
+
+model HSPItem {
+  id        String  @id @default(uuid())
+  scope     String  @default("GLOBAL") // "GLOBAL" or "u:<userId>"
+  kode      String
+  deskripsi String
+  satuan    String
+  harga     Float   @default(0)
+  isDeleted Boolean @default(false) // tombstone di scope user
+
+  category      HSPCategory @relation(fields: [hspCategoryId], references: [id], onDelete: Cascade)
+  hspCategoryId String
+
+  ahsp       AHSPRecipe?
+  ItemDetail ItemDetail[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([scope, kode], name: "scope_kode_unique")
+  @@index([hspCategoryId, scope])
+  @@map("hsp_items")
+}
+
+enum MasterItemType {
+  LABOR
+  MATERIAL
+  EQUIPMENT
+  OTHER
+}
+
+model MasterItem {
+  id    String         @id @default(uuid())
+  scope String         @default("GLOBAL")
+  code  String
+  name  String
+  unit  String
+  price Float
+  type  MasterItemType
+
+  hourlyRate Float?
+  dailyRate  Float?
+  notes      String?
+
+  components AHSPComponent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([scope, code], name: "scope_code_unique")
+  @@index([scope, type, name])
+  @@map("master_items")
+}
+
+enum AHSPComponentGroup {
+  LABOR
+  MATERIAL
+  EQUIPMENT
+  OTHER
+}
+
+model AHSPRecipe {
+  id         String          @id @default(uuid())
+  scope      String          @default("GLOBAL")
+  hspItem    HSPItem         @relation(fields: [hspItemId], references: [id], onDelete: Cascade)
+  hspItemId  String          @unique
+  components AHSPComponent[]
+
+  overheadPercent Float  @default(10)
+  subtotalABC     Float?
+  overheadAmount  Float?
+  finalUnitPrice  Float?
+
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([scope])
+  @@map("ahsp_recipes")
+}
+
+model AHSPComponent {
+  id           String             @id @default(uuid())
+  scope        String             @default("GLOBAL")
+  ahsp         AHSPRecipe         @relation(fields: [ahspId], references: [id], onDelete: Cascade)
+  ahspId       String
+  group        AHSPComponentGroup
+  masterItem   MasterItem         @relation(fields: [masterItemId], references: [id])
+  masterItemId String
+
+  nameSnapshot      String
+  unitSnapshot      String
+  unitPriceSnapshot Float
+
+  coefficient        Float  @default(1)
+  priceOverride      Float?
+  effectiveUnitPrice Float?
+  subtotal           Float?
+
+  order Int     @default(0)
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ahspId, group, order])
+  @@index([scope])
+  @@map("ahsp_components")
+}
