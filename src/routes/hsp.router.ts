@@ -27,6 +27,9 @@ import {
   updateMasterItem,
   deleteMasterItem,
   listMasterGeneric,
+  getMasterItemByCode,
+  updateMasterItemByCode,
+  deleteMasterItemByCode,
 } from "../controllers/master.controller";
 
 import {
@@ -87,7 +90,9 @@ router.post("/master", authenticate, createMasterItem);
 router.get("/master/:id", authenticate, getMasterItem);
 router.patch("/master/:id", authenticate, updateMasterItem);
 router.delete("/master/:id", authenticate, deleteMasterItem);
-
+router.get("/master/by-code/:code", authenticate, getMasterItemByCode);
+router.patch("/master/by-code/:code", authenticate, updateMasterItemByCode);
+router.delete("/master/by-code/:code", authenticate, deleteMasterItemByCode);
 /** AHSP */
 router.patch(
   "/items/by-kode/:kode/recipe",
