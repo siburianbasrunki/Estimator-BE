@@ -40,13 +40,11 @@ export const listMasterGeneric = async (
       ? (raw as any)
       : undefined;
     if (!type) {
-      res
-        .status(400)
-        .json({
-          status: "error",
-          error:
-            "Query parameter 'type' is required (LABOR|MATERIAL|EQUIPMENT|OTHER)",
-        });
+      res.status(400).json({
+        status: "error",
+        error:
+          "Query parameter 'type' is required (LABOR|MATERIAL|EQUIPMENT|OTHER)",
+      });
       return;
     }
 
@@ -88,23 +86,19 @@ export const listMasterGeneric = async (
     const total = data.length;
     data = data.slice(skip, skip + take);
 
-    res
-      .status(200)
-      .json({
-        status: "success",
-        data,
-        pagination: { skip, take, total },
-        meta: { type },
-      });
+    res.status(200).json({
+      status: "success",
+      data,
+      pagination: { skip, take, total },
+      meta: { type },
+    });
     return;
   } catch (e: any) {
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: `Failed to fetch master items`,
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: `Failed to fetch master items`,
+      detail: e?.message,
+    });
     return;
   }
 };
@@ -121,12 +115,10 @@ export const createMasterItem = async (
       req.body;
 
     if (!isStr(name) || !isStr(unit) || !isValidType(type)) {
-      res
-        .status(400)
-        .json({
-          status: "error",
-          error: "name, unit, and valid type are required",
-        });
+      res.status(400).json({
+        status: "error",
+        error: "name, unit, and valid type are required",
+      });
       return;
     }
 
@@ -150,13 +142,11 @@ export const createMasterItem = async (
       else if (Number.isFinite(hr)) priceNum = hr;
     }
     if (!Number.isFinite(priceNum) || priceNum < 0) {
-      res
-        .status(400)
-        .json({
-          status: "error",
-          error:
-            "price must be a non-negative number (or provide dailyRate/hourlyRate for LABOR)",
-        });
+      res.status(400).json({
+        status: "error",
+        error:
+          "price must be a non-negative number (or provide dailyRate/hourlyRate for LABOR)",
+      });
       return;
     }
 
@@ -179,21 +169,17 @@ export const createMasterItem = async (
     return;
   } catch (e: any) {
     if (e?.code === "P2002") {
-      res
-        .status(409)
-        .json({
-          status: "error",
-          error: "Duplicate code. 'code' must be unique in your scope.",
-        });
+      res.status(409).json({
+        status: "error",
+        error: "Duplicate code. 'code' must be unique in your scope.",
+      });
       return;
     }
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to create master item",
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to create master item",
+      detail: e?.message,
+    });
     return;
   }
 };
@@ -215,13 +201,11 @@ export const getMasterItem = async (
     res.status(200).json({ status: "success", data: item });
     return;
   } catch (e: any) {
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to fetch master item",
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to fetch master item",
+      detail: e?.message,
+    });
     return;
   }
 };
@@ -272,24 +256,20 @@ export const updateMasterItem = async (
     if (req.body.price !== undefined) {
       const n = toFloat(req.body.price, NaN);
       if (!Number.isFinite(n) || n < 0) {
-        res
-          .status(400)
-          .json({
-            status: "error",
-            error: "price must be a non-negative number",
-          });
+        res.status(400).json({
+          status: "error",
+          error: "price must be a non-negative number",
+        });
         return;
       }
       payload.price = n;
     }
     if (req.body.type !== undefined) {
       if (!isValidType(req.body.type)) {
-        res
-          .status(400)
-          .json({
-            status: "error",
-            error: "type must be LABOR|MATERIAL|EQUIPMENT|OTHER",
-          });
+        res.status(400).json({
+          status: "error",
+          error: "type must be LABOR|MATERIAL|EQUIPMENT|OTHER",
+        });
         return;
       }
       payload.type = req.body.type;
@@ -326,31 +306,25 @@ export const updateMasterItem = async (
 
     if (recompute) await recomputeRecipesUsingMasterItem(id);
 
-    res
-      .status(200)
-      .json({
-        status: "success",
-        data: updated,
-        meta: { recomputed: recompute },
-      });
+    res.status(200).json({
+      status: "success",
+      data: updated,
+      meta: { recomputed: recompute },
+    });
     return;
   } catch (e: any) {
     if (e?.code === "P2002") {
-      res
-        .status(409)
-        .json({
-          status: "error",
-          error: "Duplicate code. 'code' must be unique in its scope.",
-        });
+      res.status(409).json({
+        status: "error",
+        error: "Duplicate code. 'code' must be unique in its scope.",
+      });
       return;
     }
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to update master item",
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to update master item",
+      detail: e?.message,
+    });
     return;
   }
 };
@@ -384,13 +358,11 @@ export const deleteMasterItem = async (
     res.status(200).json({ status: "success", data: { id, deleted: true } });
     return;
   } catch (e: any) {
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to delete master item",
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to delete master item",
+      detail: e?.message,
+    });
     return;
   }
 };
@@ -457,3 +429,214 @@ async function recomputeRecipesUsingMasterItem(masterItemId: string) {
   }
 }
 
+export const getMasterItemByCode = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = (req as any).user?.id as string | undefined;
+    const userScope = scopeOf(userId);
+    const raw = decodeURIComponent((req.params.code || "").trim());
+    if (!raw) {
+      res.status(400).json({ status: "error", error: "Missing code" });
+      return;
+    }
+
+    let item = await prisma.masterItem
+      .findUnique({
+        where: { scope_code_unique: { scope: userScope, code: raw } },
+      })
+      .catch(() => null);
+
+    if (!item || item.isDeleted) {
+      const g = await prisma.masterItem.findUnique({
+        where: { scope_code_unique: { scope: "GLOBAL", code: raw } },
+      });
+      if (!g || g.isDeleted) {
+        res
+          .status(404)
+          .json({ status: "error", error: "Master item not found" });
+        return;
+      }
+      item = g;
+    }
+
+    res.status(200).json({ status: "success", data: item });
+    return;
+  } catch (e: any) {
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to fetch by code",
+        detail: e?.message,
+      });
+    return;
+  }
+};
+
+export const updateMasterItemByCode = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = (req as any).user?.id as string | undefined;
+    if (!userId) {
+      res.status(401).json({ status: "error", error: "Unauthorized" });
+      return;
+    }
+
+    const userScope = scopeOf(userId);
+    const code = decodeURIComponent((req.params.code || "").trim());
+    if (!code) {
+      res.status(400).json({ status: "error", error: "Missing code" });
+      return;
+    }
+
+    let userItem = await prisma.masterItem
+      .findUnique({
+        where: { scope_code_unique: { scope: userScope, code } },
+      })
+      .catch(() => null);
+
+    if (!userItem) {
+      const base = await prisma.masterItem.findUnique({
+        where: { scope_code_unique: { scope: "GLOBAL", code } },
+      });
+      if (!base || base.isDeleted) {
+        res.status(404).json({ status: "error", error: "Base not found" });
+        return;
+      }
+      userItem = await prisma.masterItem.create({
+        data: {
+          scope: userScope,
+          code: base.code,
+          name: base.name,
+          unit: base.unit,
+          price: base.price,
+          type: base.type,
+          hourlyRate: base.hourlyRate,
+          dailyRate: base.dailyRate,
+          notes: base.notes,
+          isDeleted: false,
+        },
+      });
+    }
+
+    const payload: any = {};
+    if (req.body.name !== undefined)
+      payload.name = String(req.body.name).trim();
+    if (req.body.unit !== undefined)
+      payload.unit = String(req.body.unit).trim();
+    if (req.body.price !== undefined) payload.price = Number(req.body.price);
+    if (req.body.notes !== undefined)
+      payload.notes = req.body.notes ? String(req.body.notes) : null;
+    if (req.body.hourlyRate !== undefined)
+      payload.hourlyRate = Number(req.body.hourlyRate);
+    if (req.body.dailyRate !== undefined)
+      payload.dailyRate = Number(req.body.dailyRate);
+    if (req.body.type !== undefined) payload.type = String(req.body.type);
+    payload.isDeleted = false;
+
+    const updated = await prisma.masterItem.update({
+      where: { id: userItem.id },
+      data: payload,
+    });
+
+    res.status(200).json({ status: "success", data: updated });
+    return;
+  } catch (e: any) {
+    if (e?.code === "P2002") {
+      res
+        .status(409)
+        .json({ status: "error", error: "Duplicate code in your scope" });
+      return;
+    }
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to update by code",
+        detail: e?.message,
+      });
+    return;
+  }
+};
+
+export const deleteMasterItemByCode = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = (req as any).user?.id as string | undefined;
+    if (!userId) {
+      res.status(401).json({ status: "error", error: "Unauthorized" });
+      return;
+    }
+
+    const userScope = scopeOf(userId);
+    const code = decodeURIComponent((req.params.code || "").trim());
+    if (!code) {
+      res.status(400).json({ status: "error", error: "Missing code" });
+      return;
+    }
+
+    const userItem = await prisma.masterItem
+      .findUnique({
+        where: { scope_code_unique: { scope: userScope, code } },
+      })
+      .catch(() => null);
+
+    if (userItem) {
+      await prisma.masterItem.update({
+        where: { id: userItem.id },
+        data: { isDeleted: true },
+      });
+      res
+        .status(200)
+        .json({
+          status: "success",
+          message: "Item hidden (deleted) in your scope",
+        });
+      return;
+    }
+
+    const global = await prisma.masterItem.findUnique({
+      where: { scope_code_unique: { scope: "GLOBAL", code } },
+    });
+
+    if (!global || global.isDeleted) {
+      res.status(404).json({ status: "error", error: "Item not found" });
+      return;
+    }
+
+    await prisma.masterItem.create({
+      data: {
+        scope: userScope,
+        code: global.code,
+        name: global.name,
+        unit: global.unit,
+        price: global.price,
+        type: global.type,
+        hourlyRate: global.hourlyRate,
+        dailyRate: global.dailyRate,
+        notes: global.notes,
+        isDeleted: true,
+      },
+    });
+
+    res
+      .status(200)
+      .json({ status: "success", message: "Item hidden for this user" });
+    return;
+  } catch (e: any) {
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to delete by code",
+        detail: e?.message,
+      });
+    return;
+  }
+};

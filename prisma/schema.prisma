@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider      = "prisma-client-js"
   binaryTargets = ["debian-openssl-3.0.x", "native"]
@@ -190,7 +187,7 @@ model MasterItem {
   hourlyRate Float?
   dailyRate  Float?
   notes      String?
-
+  isDeleted  Boolean         @default(false)
   components AHSPComponent[]
 
   createdAt DateTime @default(now())
