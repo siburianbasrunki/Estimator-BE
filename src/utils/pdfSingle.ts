@@ -1,10 +1,21 @@
-// src/utils/pdfSingles.ts
-import PdfPrinter from "pdfmake";
+// utils/pdfTable.ts
 import dayjs from "dayjs";
+import { renderPdfBuffer } from "./pdf-finalize";
 
 type ColumnWidth = number | string;
 export type TableRow = Array<string | number>;
-export type LogoOpt = { dataUrl: string; width?: number; height?: number };
+
+// Terima berbagai bentuk logo, tapi kita hanya pakai dataUrl valid untuk pdfmake
+export type LogoOpt =
+  | { dataUrl: string; width?: number; height?: number }
+  | {
+      base64: string;
+      extension: "png" | "jpeg";
+      width?: number;
+      height?: number;
+    }
+  | string // boleh langsung string "data:image/..;base64,...."
+  | undefined;
 
 export type BuildTablePdfOpts = {
   title: string;
@@ -17,16 +28,6 @@ export type BuildTablePdfOpts = {
   condense?: boolean;
   pageSize?: "A4" | "A3" | "LEGAL";
 };
-
-const fonts = {
-  Helvetica: {
-    normal: "Helvetica",
-    bold: "Helvetica-Bold",
-    italics: "Helvetica-Oblique",
-    bolditalics: "Helvetica-BoldOblique",
-  },
-};
-const printer = new PdfPrinter(fonts);
 
 // PDF points default (portrait)
 const PAGE = {
@@ -45,19 +46,55 @@ function getContentWidth(
   const contentW = pageW - (margins[0] + margins[2]);
   return contentW;
 }
-
 function sumNumericWidths(widths: ColumnWidth[]) {
   let sum = 0;
-  for (const w of widths) {
-    if (typeof w === "number") sum += w;
-  }
+  for (const w of widths) if (typeof w === "number") sum += w;
   return sum;
 }
-
 function scaleWidths(widths: ColumnWidth[], scale: number): ColumnWidth[] {
   return widths.map((w) =>
     typeof w === "number" ? Math.max(20, w * scale) : w
   );
+}
+
+/** ===== Helpers logo ===== */
+function isDataImageUrl(s: string | undefined | null): s is string {
+  return typeof s === "string" && /^data:image\/(png|jpe?g);base64,/i.test(s);
+}
+function normalizeLogo(
+  logo?: LogoOpt
+): { dataUrl: string; width?: number; height?: number } | undefined {
+  if (!logo) return undefined;
+
+  if (typeof logo === "string") {
+    if (isDataImageUrl(logo)) return { dataUrl: logo };
+    return undefined; // url http(s) ditolak pdfmake
+  }
+  if ("dataUrl" in (logo as any) && typeof (logo as any).dataUrl === "string") {
+    const lu = (logo as any).dataUrl as string;
+    if (isDataImageUrl(lu)) {
+      return {
+        dataUrl: lu,
+        width: (logo as any).width,
+        height: (logo as any).height,
+      };
+    }
+    return undefined;
+  }
+  if ("base64" in (logo as any) && "extension" in (logo as any)) {
+    const base64 = (logo as any).base64 as string;
+    const ext = (logo as any).extension as "png" | "jpeg";
+    const prefix = `data:image/${ext};base64,`;
+    const dataUrl = `${prefix}${base64.replace(/^data:image\/[a-z+]+;base64,/, "")}`;
+    if (isDataImageUrl(dataUrl)) {
+      return {
+        dataUrl,
+        width: (logo as any).width,
+        height: (logo as any).height,
+      };
+    }
+  }
+  return undefined;
 }
 
 export async function buildTablePdf(opts: BuildTablePdfOpts): Promise<Buffer> {
@@ -66,31 +103,24 @@ export async function buildTablePdf(opts: BuildTablePdfOpts): Promise<Buffer> {
   const landscape = opts.landscape ?? true;
   const margins: [number, number, number, number] = [24, 24, 24, 24];
 
-  // kita akan menentukan pageSize & widths final di sini
   let pageSize: "A4" | "A3" | "LEGAL" = basePageSize;
-
-  // siapkan widths kerja (copy)
   let finalWidths: ColumnWidth[] = [...opts.columns.widths];
 
   if (opts.fitToPage) {
-    // 1) coba A4
     let contentW = getContentWidth(pageSize, landscape, margins);
     let numericSum = sumNumericWidths(finalWidths);
 
     if (numericSum > 0 && numericSum > contentW) {
-      // 2) coba A3 kalau masih overflow
       pageSize = "A3";
       contentW = getContentWidth(pageSize, landscape, margins);
       numericSum = sumNumericWidths(finalWidths);
       if (numericSum > contentW) {
-        // 3) scale down supaya pas
         const scale = contentW / numericSum;
         finalWidths = scaleWidths(finalWidths, scale);
       }
     }
   }
 
-  // condense: kecilkan font & padding agar lebih padat
   const baseFont = opts.condense ? 8 : 9;
   const pad = opts.condense ? 4 : 6;
 
@@ -110,16 +140,16 @@ export async function buildTablePdf(opts: BuildTablePdfOpts): Promise<Buffer> {
       rowIndex === 0 ? "#0284C7" : rowIndex % 2 === 0 ? "#F8FAFC" : undefined,
   };
 
-  // content width untuk headerLine (garis)
   const contentWidth = getContentWidth(pageSize, landscape, margins);
+  const safeLogo = normalizeLogo(opts.logo);
 
   const headerTitle = {
     table: {
       widths: [100, "*", 220],
       body: [
         [
-          opts.logo
-            ? { image: opts.logo.dataUrl, fit: [100, 40], alignment: "left" }
+          safeLogo
+            ? { image: safeLogo.dataUrl, fit: [100, 40], alignment: "left" }
             : { text: "" },
           {
             stack: [
@@ -195,17 +225,15 @@ export async function buildTablePdf(opts: BuildTablePdfOpts): Promise<Buffer> {
     ),
   ];
 
-  // Definisi tabel (auto-width), nanti kita center-kan via columns
   const tableNode = {
     table: {
       headerRows: 1,
       widths: finalWidths,
       body: tableBody,
-      dontBreakRows: true, // cegah baris terpotong
+      dontBreakRows: true,
       keepWithHeaderRows: 1,
     },
     layout: gridLayout,
-    // Hapus alignment di sini; kita center lewat columns wrapper
   };
 
   const doc: any = {
@@ -215,14 +243,13 @@ export async function buildTablePdf(opts: BuildTablePdfOpts): Promise<Buffer> {
     content: [
       headerTitle,
       headerLine,
-      // ==== WRAPPER UNTUK CENTER ====
       {
         columns: [
           { width: "*", text: "" },
           { width: "auto", ...tableNode },
           { width: "*", text: "" },
         ],
-        columnGap: 0, // biar simetris rapat
+        columnGap: 0,
       },
     ],
     defaultStyle: { font: "Helvetica", fontSize: baseFont },
@@ -239,12 +266,7 @@ export async function buildTablePdf(opts: BuildTablePdfOpts): Promise<Buffer> {
     }),
   };
 
-  const pdfDoc = printer.createPdfKitDocument(doc);
-  const chunks: Buffer[] = [];
-  return await new Promise((resolve, reject) => {
-    pdfDoc.on("data", (d) => chunks.push(d));
-    pdfDoc.on("end", () => resolve(Buffer.concat(chunks)));
-    pdfDoc.on("error", reject);
-    pdfDoc.end();
-  });
+  // Render via pdf-finalize
+  const allowImages = Boolean(safeLogo?.dataUrl); // hanya boleh gambar kalau ada logo valid
+  return await renderPdfBuffer(doc, { allowImages });
 }

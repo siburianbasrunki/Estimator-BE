@@ -57,3 +57,15 @@ export const deleteFromCloudinary = async (imageId: string): Promise<void> => {
     throw error;
   }
 };
+
+export function forcePngDelivery(url: string): string {
+  if (!url) return url;
+  // sisipkan transformasi 'f_png' setelah '/upload'
+  const withTransform = url.replace(/\/upload\/(?!.*\/)/, "/upload/f_png/");
+  // kalau sudah ada transform lain, pastikan f_png ada
+  if (!/\/upload\/.*f_png/.test(withTransform)) {
+    return withTransform.replace(/\/upload\//, "/upload/f_png/");
+  }
+  // ubah ekstensi di ujung (kalau ada) ke .png
+  return withTransform.replace(/\.(webp|jpeg|jpg|png)(\?|#|$)/i, ".png$2");
+}

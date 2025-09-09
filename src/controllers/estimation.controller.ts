@@ -3,10 +3,13 @@ import prisma from "../lib/prisma";
 import {
   uploadToCloudinary,
   deleteFromCloudinary,
+  forcePngDelivery,
 } from "../utils/cloudinaryUpload";
-import { CreateEstimationData } from "../model/estimation";
 import { sanitizeFileName } from "../utils/exportHelpers";
-import { buildEstimationPdf } from "../utils/pdfGenerator";
+import {
+  buildEstimationPdf,
+  EstimationWithRelations,
+} from "../utils/pdfGenerator";
 import { buildEstimationExcel } from "../utils/excelGenerator";
 import { randomUUID } from "crypto";
 import { Prisma } from "@prisma/client";
@@ -15,6 +18,16 @@ import axios from "axios";
 export interface AuthenticatedRequest extends Request {
   userId?: string;
   userRole?: string;
+}
+
+function parseMaybeJson<T = any>(v: unknown): T {
+  if (v == null) return v as T;
+  if (typeof v === "string") {
+    try {
+      return JSON.parse(v) as T;
+    } catch {}
+  }
+  return v as T;
 }
 
 const mapJenisToVolumeOp = (jenis: string): "ADD" | "SUB" =>
@@ -75,26 +88,25 @@ export const createEstimation = async (
       return;
     }
 
-    const {
-      projectName,
-      owner,
-      ppn,
-      notes,
-      customFields,
-      estimationItem,
-    }: CreateEstimationData = req.body;
+    // Ambil field primitive langsung dari req.body
+    const { projectName, owner, ppn, notes } = req.body as any;
+
+    // ⬇️ PARSE field kompleks yg mungkin string dari multipart
+    const customFields = parseMaybeJson<Record<string, string>>(
+      req.body?.customFields
+    );
+    const estimationItem = parseMaybeJson<any[]>(req.body?.estimationItem);
 
     if (!projectName || !owner || ppn === undefined) {
-      res.status(400).json({
-        error: "Missing required fields: projectName, owner, ppn",
-      });
+      res
+        .status(400)
+        .json({ error: "Missing required fields: projectName, owner, ppn" });
       return;
     }
 
     let imageUrl: string | null = null;
     let imageId: string | null = null;
 
-    // Upload header image (jika ada) via Cloudinary
     if (req.file) {
       const uploadResult = await uploadToCloudinary(req.file.path, {
         folder: "estimations",
@@ -118,7 +130,12 @@ export const createEstimation = async (
         select: { id: true },
       });
 
-      if (customFields && Object.keys(customFields).length > 0) {
+      // customFields (object)
+      if (
+        customFields &&
+        typeof customFields === "object" &&
+        Object.keys(customFields).length > 0
+      ) {
         const rows = Object.entries(customFields).map(([label, value]) => ({
           id: randomUUID(),
           label,
@@ -129,7 +146,8 @@ export const createEstimation = async (
         await tx.customField.createMany({ data: rows });
       }
 
-      if (estimationItem && estimationItem.length > 0) {
+      // estimationItem (array)
+      if (Array.isArray(estimationItem) && estimationItem.length > 0) {
         const estItemRows: {
           id: string;
           title: string;
@@ -150,9 +168,9 @@ export const createEstimation = async (
         }[] = [];
 
         const allCodes: string[] = [];
-        for (const section of estimationItem ?? []) {
-          for (const detail of section.item ?? []) {
-            if (detail.kode) allCodes.push(detail.kode);
+        for (const section of estimationItem) {
+          for (const detail of section?.item ?? []) {
+            if (detail?.kode) allCodes.push(detail.kode);
           }
         }
         const hspMap = await buildHspCodeMap(tx, userId, allCodes);
@@ -161,36 +179,36 @@ export const createEstimation = async (
           const estItemId = randomUUID();
           estItemRows.push({
             id: estItemId,
-            title: section.title,
+            title: String(section?.title ?? ""), // pastikan string
             estimationId: newEst.id,
           });
 
-          for (const detail of section.item ?? []) {
+          for (const detail of section?.item ?? []) {
             const itemId = randomUUID();
-            const hspId = detail.kode ? hspMap.get(detail.kode) : undefined;
+            const hspId = detail?.kode ? hspMap.get(detail.kode) : undefined;
             itemDetailRows.push({
               id: itemId,
-              kode: detail.kode ?? "",
-              deskripsi: detail.nama ?? "",
-              volume: Number(detail.volume ?? 0),
-              satuan: detail.satuan ?? "",
-              hargaSatuan: Number(detail.harga ?? 0),
-              hargaTotal: Number(detail.hargaTotal ?? 0),
+              kode: detail?.kode ?? "",
+              deskripsi: detail?.nama ?? "",
+              volume: Number(detail?.volume ?? 0),
+              satuan: detail?.satuan ?? "",
+              hargaSatuan: Number(detail?.harga ?? 0),
+              hargaTotal: Number(detail?.hargaTotal ?? 0),
               estimationItemId: estItemId,
               hspItemId: hspId,
             });
 
-            for (const d of detail.details ?? []) {
+            for (const d of detail?.details ?? []) {
               volDetailRows.push({
                 id: randomUUID(),
-                nama: d.nama ?? "",
-                jenis: mapJenisToVolumeOp(d.jenis),
-                panjang: Number(d.panjang ?? 0),
-                lebar: Number(d.lebar ?? 0),
-                tinggi: Number(d.tinggi ?? 0),
-                jumlah: Number(d.jumlah ?? 0),
-                volume: Number(d.volume ?? 0),
-                extras: Array.isArray(d.extras) ? d.extras : [],
+                nama: d?.nama ?? "",
+                jenis: mapJenisToVolumeOp(d?.jenis),
+                panjang: Number(d?.panjang ?? 0),
+                lebar: Number(d?.lebar ?? 0),
+                tinggi: Number(d?.tinggi ?? 0),
+                jumlah: Number(d?.jumlah ?? 0),
+                volume: Number(d?.volume ?? 0),
+                extras: Array.isArray(d?.extras) ? d.extras : [],
                 itemDetailId: itemId,
               });
             }
@@ -213,11 +231,7 @@ export const createEstimation = async (
       include: {
         author: { select: { id: true, name: true, email: true } },
         customFields: true,
-        items: {
-          include: {
-            details: { include: { volumeDetails: true } },
-          },
-        },
+        items: { include: { details: { include: { volumeDetails: true } } } },
       },
     });
 
@@ -332,14 +346,6 @@ export const updateEstimation = async (
   try {
     const userId = req.userId;
     const { id } = req.params;
-    const {
-      projectName,
-      owner,
-      ppn,
-      notes,
-      customFields,
-      estimationItem,
-    }: Partial<CreateEstimationData> = req.body;
 
     if (!userId)
       return void res.status(401).json({ error: "User not authenticated" });
@@ -352,6 +358,15 @@ export const updateEstimation = async (
       return void res
         .status(404)
         .json({ status: "error", error: "Estimation not found" });
+
+    // Ambil primitive
+    const { projectName, owner, ppn, notes } = req.body as any;
+
+    // ⬇️ PARSE field kompleks (bisa string dari multipart)
+    const customFields = parseMaybeJson<Record<string, string>>(
+      req.body?.customFields
+    );
+    const estimationItem = parseMaybeJson<any[]>(req.body?.estimationItem);
 
     let imageUrl: string | undefined;
     let imageId: string | undefined;
@@ -377,9 +392,10 @@ export const updateEstimation = async (
         await tx.estimation.update({ where: { id }, data: updateData });
       }
 
+      // customFields (object)
       if (customFields) {
         await tx.customField.deleteMany({ where: { estimationId: id } });
-        const entries = Object.entries(customFields);
+        const entries = Object.entries(customFields || {});
         if (entries.length > 0) {
           const rows = entries.map(([label, value]) => ({
             id: randomUUID(),
@@ -392,7 +408,8 @@ export const updateEstimation = async (
         }
       }
 
-      if (estimationItem) {
+      // estimationItem (array)
+      if (Array.isArray(estimationItem)) {
         await tx.volumeDetail.deleteMany({
           where: { itemDetail: { estimationItem: { estimationId: id } } },
         });
@@ -422,8 +439,8 @@ export const updateEstimation = async (
 
         const allCodes: string[] = [];
         for (const section of estimationItem ?? []) {
-          for (const detail of section.item ?? []) {
-            if (detail.kode) allCodes.push(detail.kode);
+          for (const detail of section?.item ?? []) {
+            if (detail?.kode) allCodes.push(detail.kode);
           }
         }
         const hspMap = await buildHspCodeMap(tx, userId, allCodes);
@@ -432,36 +449,36 @@ export const updateEstimation = async (
           const estItemId = randomUUID();
           estItemRows.push({
             id: estItemId,
-            title: section.title,
+            title: String(section?.title ?? ""), // WAJIB ada
             estimationId: id,
           });
 
-          for (const detail of section.item ?? []) {
+          for (const detail of section?.item ?? []) {
             const itemId = randomUUID();
-            const hspId = detail.kode ? hspMap.get(detail.kode) : undefined;
+            const hspId = detail?.kode ? hspMap.get(detail.kode) : undefined;
             itemDetailRows.push({
               id: itemId,
-              kode: detail.kode ?? "",
-              deskripsi: detail.nama ?? "",
-              volume: Number(detail.volume ?? 0),
-              satuan: detail.satuan ?? "",
-              hargaSatuan: Number(detail.harga ?? 0),
-              hargaTotal: Number(detail.hargaTotal ?? 0),
+              kode: detail?.kode ?? "",
+              deskripsi: detail?.nama ?? "",
+              volume: Number(detail?.volume ?? 0),
+              satuan: detail?.satuan ?? "",
+              hargaSatuan: Number(detail?.harga ?? 0),
+              hargaTotal: Number(detail?.hargaTotal ?? 0),
               estimationItemId: estItemId,
               hspItemId: hspId,
             });
 
-            for (const d of detail.details ?? []) {
+            for (const d of detail?.details ?? []) {
               volDetailRows.push({
                 id: randomUUID(),
-                nama: d.nama ?? "",
-                jenis: mapJenisToVolumeOp(d.jenis),
-                panjang: Number(d.panjang ?? 0),
-                lebar: Number(d.lebar ?? 0),
-                tinggi: Number(d.tinggi ?? 0),
-                jumlah: Number(d.jumlah ?? 0),
-                volume: Number(d.volume ?? 0),
-                extras: Array.isArray(d.extras) ? d.extras : [],
+                nama: d?.nama ?? "",
+                jenis: mapJenisToVolumeOp(d?.jenis),
+                panjang: Number(d?.panjang ?? 0),
+                lebar: Number(d?.lebar ?? 0),
+                tinggi: Number(d?.tinggi ?? 0),
+                jumlah: Number(d?.jumlah ?? 0),
+                volume: Number(d?.volume ?? 0),
+                extras: Array.isArray(d?.extras) ? d.extras : [],
                 itemDetailId: itemId,
               });
             }
@@ -696,7 +713,6 @@ export const downloadEstimationPdf = async (
   try {
     const userId = req.userId;
     const { id } = req.params;
-
     if (!userId) {
       return void res
         .status(401)
@@ -708,66 +724,83 @@ export const downloadEstimationPdf = async (
       include: {
         author: { select: { id: true, name: true, email: true } },
         customFields: true,
-        items: { include: { details: true } },
+        items: {
+          include: {
+            details: {
+              include: {
+                volumeDetails: true,
+                hspItem: {
+                  include: {
+                    category: true,
+                    ahsp: {
+                      include: {
+                        components: { include: { masterItem: true } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     });
-
     if (!estimation) {
       return void res
         .status(404)
         .json({ status: "error", error: "Estimation not found" });
     }
 
-    // --- Siapkan logo (upload → dataURL) ---
+    // siapkan logo jadi dataURL PNG (opsional)
     let logoDataUrl: string | undefined;
-
-    // Prioritas 1: file upload "logo"
     const file = (req as any).file as Express.Multer.File | undefined;
+
     if (file) {
       const up = await uploadToCloudinary(file.path, {
         folder: "estimations/export-logos",
         format: "png",
       });
       tempLogoPublicId = up.imageId;
-
       const resp = await axios.get<ArrayBuffer>(up.imageUrl, {
         responseType: "arraybuffer",
       });
-      const ext = guessExt(up.imageUrl);
-      logoDataUrl = toBase64DataUrl(resp.data, ext);
-    }
-    // Prioritas 2: estimation.imageUrl (fallback)
-    else if (estimation.imageUrl) {
+      const b64 = Buffer.from(resp.data).toString("base64");
+      logoDataUrl = `data:image/png;base64,${b64}`;
+    } else if (estimation.imageUrl) {
       try {
-        const resp = await axios.get<ArrayBuffer>(estimation.imageUrl, {
+        const pngUrl = forcePngDelivery(estimation.imageUrl);
+        const resp = await axios.get<ArrayBuffer>(pngUrl, {
           responseType: "arraybuffer",
         });
-        const ext = guessExt(estimation.imageUrl);
-        logoDataUrl = toBase64DataUrl(resp.data, ext);
+        const b64 = Buffer.from(resp.data).toString("base64");
+        logoDataUrl = `data:image/png;base64,${b64}`;
       } catch {
-        // fallback gagal → jalan tanpa logo
+        /* jalan tanpa logo */
       }
     }
 
     const safeName = sanitizeFileName(estimation.projectName);
     const fileName = `RAB_${safeName}.pdf`;
 
-    const pdfBuffer = await buildEstimationPdf(estimation as any, {
-      logo: logoDataUrl
-        ? { dataUrl: logoDataUrl, width: 110, height: 36 }
-        : undefined,
-      // isi identitas organisasi di sini jika perlu tampil di kop:
-      // org: { name: "...", address: "...", phone: "...", email: "...", website: "..." },
-      landscape: true,
-      titleOverride: "Rencana Anggaran Biaya",
-    });
+    // Contoh: RAB saja (tanpa AHSP/Volume). Jika nanti buat endpoint AHSP/Volume,
+    // cukup JANGAN kirim logo => otomatis "no-image mode" (aman).
+    const pdfBuffer = await buildEstimationPdf(
+      estimation as unknown as EstimationWithRelations,
+      {
+        logo: logoDataUrl
+          ? { dataUrl: logoDataUrl, width: 110, height: 36 }
+          : undefined,
+        landscape: true,
+        titleOverride: "Rencana Anggaran Biaya",
+        includeAhsp: false,
+        includeVolume: false,
+      }
+    );
 
     if (tempLogoPublicId) {
       try {
         await deleteFromCloudinary(tempLogoPublicId);
-      } catch (e) {
-        console.warn("Cleanup temp logo failed:", e);
-      }
+      } catch {}
     }
 
     res.setHeader("Content-Type", "application/pdf");
@@ -777,12 +810,12 @@ export const downloadEstimationPdf = async (
     );
     res.status(200).send(pdfBuffer);
   } catch (error) {
-    console.error("Download PDF error:", error);
     if (tempLogoPublicId) {
       try {
         await deleteFromCloudinary(tempLogoPublicId);
       } catch {}
     }
+    console.error("Download PDF error:", error);
     res.status(500).json({ status: "error", error: "Failed to generate PDF" });
   }
 };

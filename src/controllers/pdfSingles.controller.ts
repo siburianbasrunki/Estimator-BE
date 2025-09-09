@@ -6,6 +6,7 @@ import { sanitizeFileName } from "../utils/exportHelpers";
 import {
   uploadToCloudinary,
   deleteFromCloudinary,
+  forcePngDelivery,
 } from "../utils/cloudinaryUpload";
 import { buildTablePdf } from "../utils/pdfSingle";
 
@@ -23,6 +24,11 @@ function toBase64DataUrl(arrbuf: ArrayBuffer, ext: "png" | "jpeg") {
   const b64 = Buffer.from(arrbuf).toString("base64");
   return `data:image/${ext};base64,${b64}`;
 }
+function isSupportedImageContentType(ct?: string) {
+  if (!ct) return false;
+  const s = ct.toLowerCase();
+  return s.includes("image/png") || s.includes("image/jpeg") || s.includes("image/jpg");
+}
 
 async function resolveLogoDataUrl(
   req: Request,
@@ -33,27 +39,35 @@ async function resolveLogoDataUrl(
   let tempPublicId: string | undefined;
   try {
     if (file) {
+      // Paksa upload sebagai PNG agar selalu kompatibel
       const up = await uploadToCloudinary(file.path, {
         folder: "estimations/export-logos",
         format: "png",
       });
-      tempPublicId = up.imageId;
-      const resp = await axios.get<ArrayBuffer>(up.imageUrl, {
-        responseType: "arraybuffer",
-      });
-      const ext = guessExt(up.imageUrl);
+      const fetchUrl = forcePngDelivery(up.imageUrl); // pastikan PNG delivery
+      const resp = await axios.get<ArrayBuffer>(fetchUrl, { responseType: "arraybuffer" });
+
+      const ct = resp.headers?.["content-type"];
+      if (!isSupportedImageContentType(ct)) return undefined;
+
       return {
-        dataUrl: toBase64DataUrl(resp.data, ext),
+        dataUrl: toBase64DataUrl(resp.data, "png"),
         width: 110,
         height: 36,
       };
     } else if (estimationImageUrl) {
-      const resp = await axios.get<ArrayBuffer>(estimationImageUrl, {
-        responseType: "arraybuffer",
-      });
-      const ext = guessExt(estimationImageUrl);
+      // estimationImageUrl mungkin WEBP → paksa Cloudinary output PNG
+      const fetchUrl = forcePngDelivery(estimationImageUrl);
+      const resp = await axios.get<ArrayBuffer>(fetchUrl, { responseType: "arraybuffer" });
+
+      const ct = resp.headers?.["content-type"];
+      if (!isSupportedImageContentType(ct)) {
+        // kalau bukan png/jpeg, jangan paksa → lebih baik tidak pakai logo
+        return undefined;
+      }
+
       return {
-        dataUrl: toBase64DataUrl(resp.data, ext),
+        dataUrl: toBase64DataUrl(resp.data, "png"),
         width: 110,
         height: 36,
       };
@@ -61,9 +75,7 @@ async function resolveLogoDataUrl(
     return undefined;
   } finally {
     if (tempPublicId) {
-      try {
-        await deleteFromCloudinary(tempPublicId);
-      } catch {}
+      try { await deleteFromCloudinary(tempPublicId); } catch {}
     }
   }
 }
