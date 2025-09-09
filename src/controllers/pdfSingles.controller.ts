@@ -9,17 +9,13 @@ import {
   forcePngDelivery,
 } from "../utils/cloudinaryUpload";
 import { buildTablePdf } from "../utils/pdfSingle";
+import { buildAhspPdf } from "../utils/pdfAhsp";
 
 export interface AuthenticatedRequest extends Request {
   userId?: string;
 }
 
-function guessExt(urlOrMime?: string): "png" | "jpeg" {
-  const s = (urlOrMime || "").toLowerCase();
-  if (s.includes("jpeg") || s.includes(".jpeg") || s.includes(".jpg"))
-    return "jpeg";
-  return "png";
-}
+
 function toBase64DataUrl(arrbuf: ArrayBuffer, ext: "png" | "jpeg") {
   const b64 = Buffer.from(arrbuf).toString("base64");
   return `data:image/${ext};base64,${b64}`;
@@ -311,64 +307,29 @@ export const downloadAHSPPdf = async (
     if (!est)
       return void res.status(404).json({ error: "Estimation not found" });
 
-    type Row = (string | number)[];
-    const rows: Row[] = [];
-    const N = (v: any, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
-
+    // Kumpulkan AHSP unik (urutan by kode seperti Excel)
+    const uniqHsp = new Map<string, { hsp: any }>();
     for (const sec of est.items) {
       for (const d of sec.details) {
         const h = d.hspItem;
-        if (!h || !h.ahsp) continue;
-        const kode = h.kode || "";
-        const desk = h.deskripsi || d.deskripsi || "-";
-        const satuanHsp = h.satuan || d.satuan || "-";
-        const recipe = h.ahsp;
-
-        for (const c of recipe.components || []) {
-          const m = c.masterItem;
-          const eff = N(c.effectiveUnitPrice ?? c.priceOverride ?? m?.price, 0);
-          const sub = N(c.subtotal, N(c.coefficient, 1) * eff);
-          rows.push([
-            kode,
-            desk,
-            satuanHsp,
-            String(c.group),
-            m?.code || "",
-            c.nameSnapshot || m?.name || "",
-            c.unitSnapshot || m?.unit || "",
-            N(c.coefficient, 1),
-            eff,
-            sub,
-          ]);
-        }
+        if (!h) continue;
+        if (!uniqHsp.has(h.id)) uniqHsp.set(h.id, { hsp: h });
       }
     }
+    const blocks = [...uniqHsp.values()].sort((a, b) =>
+      (a.hsp.kode || "").localeCompare(b.hsp.kode || "")
+    );
 
     const logo = await resolveLogoDataUrl(req, est.imageUrl);
-    const pdf = await buildTablePdf({
+
+    const pdf = await buildAhspPdf({
       title: "AHSP Dipakai",
       subtitle: `${est.projectName} • ${est.projectOwner}`,
-      columns: {
-        headers: [
-          "Kode HSP",
-          "Deskripsi HSP",
-          "Sat HSP",
-          "Group",
-          "Kode Master",
-          "Nama Komponen",
-          "Satuan",
-          "Koef.",
-          "Harga Satuan",
-          "Subtotal",
-        ],
-        widths: [70, 180, 50, 60, 70, 160, 55, 45, 80, 90],
-      },
-      rows,
+      blocks: blocks as any,
       logo,
+      pageSize: "LEGAL",
       landscape: true,
       condense: true,
-      fitToPage: true,
-      pageSize: "LEGAL",
     });
 
     const fileName = `AHSP_${sanitizeFileName(est.projectName)}.pdf`;
