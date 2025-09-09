@@ -54,7 +54,7 @@ function baseEmailHTML({
                 <table role="presentation" width="100%">
                   <tr>
                     <td align="left" style="font-weight:700; font-size:18px; color:${BRAND_PRIMARY};">
-                      Budgetify
+                      RABCepat
                     </td>
                     <td align="right" style="font-size:12px; color:${MUTED_COLOR};">
                       Notifikasi Sistem
@@ -95,12 +95,12 @@ function baseEmailHTML({
                 <table role="presentation" width="100%" style="margin-top:16px;">
                   <tr>
                     <td style="font-size:12px; color:${MUTED_COLOR}; text-align:left;">
-                      Email ini dikirim otomatis oleh Budgetify. Jangan balas ke alamat ini.
+                      Email ini dikirim otomatis oleh RABCepat. Jangan balas ke alamat ini.
                     </td>
                   </tr>
                   <tr>
                     <td style="font-size:12px; color:${MUTED_COLOR}; padding-top:8px;">
-                      © ${new Date().getFullYear()} Budgetify
+                      © ${new Date().getFullYear()} RABCepat
                     </td>
                   </tr>
                 </table>
@@ -118,7 +118,7 @@ function baseEmailHTML({
 }
 
 export const sendRegistrationEmail = async (email: string, name: string) => {
-  const subject = `Selamat datang di Budgetify, ${name}! 🎉`;
+  const subject = `Selamat datang di RABCepat, ${name}! 🎉`;
   const preheader = "Akun kamu berhasil dibuat. Yuk mulai atur anggaran pertama kamu.";
   const html = baseEmailHTML({
     preheader,
@@ -133,8 +133,8 @@ export const sendRegistrationEmail = async (email: string, name: string) => {
       </ul>
       <p>Mulai sekarang, kamu bisa masuk ke aplikasi dan membuat anggaran pertamamu.</p>
     `,
-    ctaLabel: "Masuk ke Budgetify",
-    ctaHref: "https://app.budgetify.id/login",
+    ctaLabel: "Masuk ke RABCepat",
+    ctaHref: "https://rabcepat.com/login",
     footerNote: "Jika kamu tidak merasa membuat akun, abaikan email ini."
   });
 
@@ -143,13 +143,13 @@ export const sendRegistrationEmail = async (email: string, name: string) => {
     ``,
     `Hai ${email},`,
     `Akun kamu sudah aktif. Kamu bisa masuk ke aplikasi dan mulai membuat anggaran pertama.`,
-    `Masuk: https://app.budgetify.id/login`,
+    // `Masuk: https://rabcepat.com/login`,
     ``,
     `Jika kamu tidak merasa membuat akun, abaikan email ini.`,
   ].join("\n");
 
   const { data, error } = await resend.emails.send({
-    from: "Budgetify <no-reply@budgetify.id>",
+    from: "RABCepat <no-reply@rabcepat.com>",
     to: email,
     subject,
     html,
@@ -164,8 +164,8 @@ export const sendRegistrationEmail = async (email: string, name: string) => {
 };
 
 export const sendOtpEmail = async (email: string, otp: string, name: string) => {
-  const subject = "Kode OTP Budgetify Kamu (berlaku 15 menit)";
-  const preheader = "Jangan bagikan OTP ke siapa pun. Berlaku 15 menit.";
+  const subject = "Kode OTP RABCepat Kamu ";
+  const preheader = "Jangan bagikan OTP ke siapa pun.";
   const html = baseEmailHTML({
     preheader,
     title: "Verifikasi Masuk",
@@ -176,7 +176,7 @@ export const sendOtpEmail = async (email: string, otp: string, name: string) => 
         <div style="font-size:28px; letter-spacing:6px; font-weight:700; color:${BRAND_PRIMARY};">${otp}</div>
         <div style="font-size:12px; color:${MUTED_COLOR}; margin-top:6px;">Berlaku selama 15 menit</div>
       </div>
-      <p style="margin-top:0;">Demi keamanan, <strong>jangan bagikan OTP</strong> ini kepada siapa pun, termasuk pihak yang mengaku dari Budgetify.</p>
+      <p style="margin-top:0;">Demi keamanan, <strong>jangan bagikan OTP</strong> ini kepada siapa pun, termasuk pihak yang mengaku dari RABCepat.</p>
     `,
     footerNote: "Tidak meminta OTP? Abaikan email ini."
   });
@@ -191,7 +191,7 @@ export const sendOtpEmail = async (email: string, otp: string, name: string) => 
   ].join("\n");
 
   const { data, error } = await resend.emails.send({
-    from: "Budgetify <no-reply@budgetify.id>",
+    from: "RABCepat <no-reply@rabcepat.com>",
     to: email,
     subject,
     html,
