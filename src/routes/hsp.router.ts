@@ -19,6 +19,8 @@ import {
   deleteHspItem,
   updateHspItemByKode,
   deleteHspItemByKode,
+  setHspOverrideActive,
+  listAllScopesWithItems,
 } from "../controllers/hsp.controller";
 
 import {
@@ -30,6 +32,7 @@ import {
   getMasterItemByCode,
   updateMasterItemByCode,
   deleteMasterItemByCode,
+  setMasterOverrideActive,
 } from "../controllers/master.controller";
 
 import {
@@ -53,6 +56,7 @@ router.get("/categories", authenticate, listCategories);
 router.get("/categories/:id", authenticate, getCategoryWithItems);
 router.get("/items", authenticate, listItems);
 router.get("/with-items", authenticate, listAllGrouped);
+router.get("/admin/all-with-items", authenticate, listAllScopesWithItems);
 
 /** Detail HSD (HSP + AHSP breakdown) */
 router.get("/items/:id/detail", authenticate, getHsdDetail);
@@ -108,7 +112,8 @@ router.patch("/recipe/components/:id", authenticate, updateAhspComponent);
 router.delete("/recipe/components/:id", authenticate, deleteAhspComponent);
 
 router.post("/items/:id/recompute", authenticate, recomputeHspItem);
-
+router.patch("/items/by-kode/:kode/override/active", authenticate, setHspOverrideActive);
+router.patch("/master/by-code/:code/override/active", authenticate, setMasterOverrideActive);
 /** Kategori HSP (CRUD) */
 router.post("/categories", authenticate, createHspCategory);
 router.patch("/categories/:id", authenticate, updateHspCategory);

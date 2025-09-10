@@ -146,13 +146,14 @@ model HSPCategory {
 }
 
 model HSPItem {
-  id        String  @id @default(uuid())
-  scope     String  @default("GLOBAL") // "GLOBAL" or "u:<userId>"
-  kode      String
-  deskripsi String
-  satuan    String
-  harga     Float   @default(0)
-  isDeleted Boolean @default(false) // tombstone di scope user
+  id         String  @id @default(uuid())
+  scope      String  @default("GLOBAL") // "GLOBAL" or "u:<userId>"
+  kode       String
+  deskripsi  String
+  satuan     String
+  harga      Float   @default(0)
+  isDeleted  Boolean @default(false)
+  isDisabled Boolean @default(false)
 
   category      HSPCategory @relation(fields: [hspCategoryId], references: [id], onDelete: Cascade)
   hspCategoryId String
@@ -188,6 +189,7 @@ model MasterItem {
   dailyRate  Float?
   notes      String?
   isDeleted  Boolean         @default(false)
+  isDisabled Boolean         @default(false)
   components AHSPComponent[]
 
   createdAt DateTime @default(now())

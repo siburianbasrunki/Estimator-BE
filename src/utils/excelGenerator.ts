@@ -122,16 +122,6 @@ const N = (v: any, def = 0) => {
   return Number.isFinite(n) ? n : def;
 };
 
-const GROUP_LABEL: Record<AHSPComponentGroup, string> = {
-  LABOR: "A • Labor",
-  MATERIAL: "B • Material",
-  EQUIPMENT: "C • Equipment",
-  OTHER: "Other",
-};
-
-/** =========================
- *   Header helpers
- *  ========================= */
 const pxToColWidth = (px: number) => Math.max(10, Math.round((px - 5) / 7));
 const pxToRowHeight = (px: number) => Math.max(24, Math.round(px * 0.75));
 
@@ -212,13 +202,13 @@ function addHeaderWithLogo(
 }
 
 /** =========================
- *   SHEETS (return ws)
+ *   SHEETS
  *  ========================= */
 function addSheetKategoriDipakai(
   wb: ExcelJS.Workbook,
   est: EstimationWithRelations
 ) {
-  const ws = wb.addWorksheet("Kategori Dipakai", {
+  const ws = wb.addWorksheet("Rekapitulasi Kategori", {
     views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: {
       orientation: "landscape",
@@ -291,7 +281,7 @@ function addSheetJobItemDipakai(
   wb: ExcelJS.Workbook,
   est: EstimationWithRelations
 ) {
-  const ws = wb.addWorksheet("Job Item Dipakai", {
+  const ws = wb.addWorksheet("Rekapitulasi Pekerjaan", {
     views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: {
       orientation: "landscape",
@@ -337,7 +327,6 @@ function addSheetJobItemDipakai(
       const hsRaw =
         (typeof d.hargaSatuan === "number" ? d.hargaSatuan : undefined) ?? 0;
       const hs = Number.isFinite(hsRaw) ? Number(hsRaw) : 0;
-
       const key = kode ? `K:${kode}` : `D:${desk}|S:${sat}`;
       if (!uniq.has(key)) uniq.set(key, { desk, sat, hs });
     }
@@ -369,8 +358,12 @@ function addSheetJobItemDipakai(
   return ws;
 }
 
-function addSheetVolume(wb: ExcelJS.Workbook, est: EstimationWithRelations) {
-  const ws = wb.addWorksheet("Volume", {
+/** Volume (tabel detail): Item Pekerjaan + kolom P, L, T, dst. */
+function addSheetVolumeDetailed(
+  wb: ExcelJS.Workbook,
+  est: EstimationWithRelations
+) {
+  const ws = wb.addWorksheet("Rekapitulasi Volume", {
     views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: {
       orientation: "landscape",
@@ -382,6 +375,7 @@ function addSheetVolume(wb: ExcelJS.Workbook, est: EstimationWithRelations) {
   });
 
   ws.columns = [
+    { header: "Item Pekerjaan", key: "item", width: 56 },
     { header: "Nama Volume", key: "nama", width: 30 },
     { header: "Jenis (+/-)", key: "jenis", width: 12 },
     { header: "P", key: "p", width: 10 },
@@ -395,6 +389,7 @@ function addSheetVolume(wb: ExcelJS.Workbook, est: EstimationWithRelations) {
 
   addTitleBarAuto(ws, "Volume Detail");
 
+  // Header
   const header = ws.getRow(2);
   header.values = ws.columns.map((c) => (c.header ?? "") as string);
   header.eachCell((c) => {
@@ -408,56 +403,62 @@ function addSheetVolume(wb: ExcelJS.Workbook, est: EstimationWithRelations) {
     c.border = BORDER_THIN as any;
   });
 
+  // Data
   const rows: (string | number)[][] = [];
   for (const sec of est.items) {
     for (const d of sec.details) {
+      const job = d.deskripsi || d.hspItem?.deskripsi || "-";
       const sat = d.satuan || d.hspItem?.satuan || "-";
       const vols = d.volumeDetails || [];
       if (!vols.length) continue;
+
       for (const v of vols) {
         const sign = v.jenis === "SUB" ? -1 : 1;
         rows.push([
-          v.nama || "-",
-          v.jenis || "-",
-          Number(v.panjang || 0),
-          Number(v.lebar || 0),
-          Number(v.tinggi || 0),
-          Number(v.jumlah || 0),
-          Number(v.volume || 0),
-          sign * Number(v.volume || 0),
-          sat,
+          job, // Item Pekerjaan
+          v.nama || "-", // Nama Volume
+          sign === 1 ? "+" : "-", // Jenis (+/-)
+          Number(v.panjang || 0), // P
+          Number(v.lebar || 0), // L
+          Number(v.tinggi || 0), // T
+          Number(v.jumlah || 0), // Jumlah
+          Number(v.volume || 0), // Volume
+          sign * Number(v.volume || 0), // Signed Vol
+          sat, // Satuan
         ]);
       }
     }
   }
+
   if (rows.length) ws.addRows(rows);
 
+  // Styling baris data
   const dataStart = 3;
   for (let r = dataStart; r < dataStart + rows.length; r++) {
     const row = ws.getRow(r);
     row.eachCell((c, ci) => {
       c.border = BORDER_THIN as any;
-      if ([3, 4, 5, 6, 7, 8].includes(ci))
-        c.alignment = { horizontal: "right" };
-      if (ci === 1) c.alignment = { wrapText: true };
+      if ([4, 5, 6, 7, 8, 9].includes(ci))
+        c.alignment = { horizontal: "right" }; // numeric
+      if ([1, 2].includes(ci))
+        c.alignment = { vertical: "top", wrapText: true };
     });
-    if ((r - dataStart) % 2 === 1)
+    if ((r - dataStart) % 2 === 1) {
       row.fill = {
         type: "pattern",
         pattern: "solid",
         fgColor: { argb: COLORS.zebra },
       };
+    }
   }
 
   return ws;
 }
 
-function addSheetAHSPDipakai(
-  wb: ExcelJS.Workbook,
-  est: EstimationWithRelations
-) {
-  const ws = wb.addWorksheet("AHSP Dipakai", {
-    views: [{ state: "frozen", ySplit: 2 }],
+/** AHSP breakdown per item (ringkasan + tabel terperinci per grup) */
+function addSheetAHSP(wb: ExcelJS.Workbook, est: EstimationWithRelations) {
+  const ws = wb.addWorksheet("AHSP", {
+    views: [{ state: "frozen", ySplit: 1 }],
     pageSetup: {
       orientation: "landscape",
       fitToPage: true,
@@ -467,267 +468,303 @@ function addSheetAHSPDipakai(
     properties: { defaultRowHeight: 18 },
   });
 
+  // 7 kolom agar cukup untuk tabel breakdown
   ws.columns = [
-    { header: "Kode HSP", key: "kode", width: 18 },
-    { header: "Deskripsi HSP", key: "desk", width: 48 },
-    { header: "Satuan HSP", key: "sat", width: 12 },
-    { header: "Group", key: "grp", width: 16 },
-    { header: "Kode Master", key: "mcode", width: 18 },
-    { header: "Nama Komponen", key: "mname", width: 40 },
-    { header: "Satuan", key: "munit", width: 12 },
-    { header: "Koef.", key: "coef", width: 10 },
+    { header: "", key: "c1", width: 6 }, // No / A-B-C / No komponen
+    { header: "", key: "c2", width: 44 }, // Deskripsi / Uraian
+    { header: "", key: "c3", width: 18 }, // Kode
+    { header: "", key: "c4", width: 12 }, // Satuan
+    { header: "", key: "c5", width: 12 }, // Koef
+    { header: "", key: "c6", width: 18 }, // Harga Satuan
+    { header: "", key: "c7", width: 18 }, // Jumlah Harga
+  ];
+
+  addTitleBarAuto(ws, "AHSP");
+
+  const groups: Array<{
+    key: AHSPComponentGroup;
+    letter: "A" | "B" | "C";
+    title: string;
+    subLabel: string;
+  }> = [
     {
-      header: "Harga Satuan",
-      key: "uprice",
-      width: 18,
-      style: { numFmt: NUMFMT_IDR, alignment: { horizontal: "right" } },
+      key: "LABOR",
+      letter: "A",
+      title: "TENAGA",
+      subLabel: "JUMLAH TENAGA KERJA",
     },
     {
-      header: "Subtotal",
-      key: "subtotal",
-      width: 18,
-      style: { numFmt: NUMFMT_IDR, alignment: { horizontal: "right" } },
+      key: "MATERIAL",
+      letter: "B",
+      title: "BAHAN",
+      subLabel: "JUMLAH HARGA BAHAN",
+    },
+    {
+      key: "EQUIPMENT",
+      letter: "C",
+      title: "PERALATAN",
+      subLabel: "JUMLAH HARGA ALAT",
     },
   ];
 
-  addTitleBarAuto(ws, "AHSP Dipakai");
-
-  const header = ws.getRow(2);
-  header.values = ws.columns.map((c) => (c.header ?? "") as string);
-  header.eachCell((c) => {
-    c.font = FONT.header as any;
-    c.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-    c.fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: COLORS.headerBlue },
+  // Kumpulkan AHSP unik yang dipakai
+  type Block = {
+    hsp: HSPItem & {
+      ahsp?:
+        | (AHSPRecipe & {
+            components: (AHSPComponent & { masterItem: MasterItem })[];
+          })
+        | null;
     };
-    c.border = BORDER_THIN as any;
-  });
-
-  type Row = (string | number)[];
-  const rows: Row[] = [];
-
-  for (const sec of est.items) {
-    for (const d of sec.details) {
-      const h = d.hspItem;
-      if (!h || !h.ahsp) continue;
-
-      const kode = h.kode || "";
-      const desk = h.deskripsi || d.deskripsi || "-";
-      const satuanHsp = h.satuan || d.satuan || "-";
-      const recipe = h.ahsp;
-
-      for (const c of recipe.components || []) {
-        const grp = GROUP_LABEL[c.group] || c.group;
-        const m = c.masterItem;
-        const eff = N(c.effectiveUnitPrice ?? c.priceOverride ?? m?.price, 0);
-        const sub = N(c.subtotal, N(c.coefficient, 1) * eff);
-
-        rows.push([
-          kode,
-          desk,
-          satuanHsp,
-          grp,
-          m?.code || "",
-          c.nameSnapshot || m?.name || "",
-          c.unitSnapshot || m?.unit || "",
-          N(c.coefficient, 1),
-          eff,
-          sub,
-        ]);
-      }
-
-      if (
-        recipe.subtotalABC != null ||
-        recipe.overheadAmount != null ||
-        recipe.finalUnitPrice != null
-      ) {
-        rows.push([
-          kode,
-          desk,
-          satuanHsp,
-          "—",
-          "",
-          "Subtotal ABC (D)",
-          "",
-          "",
-          "",
-          N(recipe.subtotalABC, 0),
-        ]);
-        rows.push([
-          kode,
-          desk,
-          satuanHsp,
-          "—",
-          "",
-          `Overhead ${N(recipe.overheadPercent, 10)}% (E)`,
-          "",
-          "",
-          "",
-          N(recipe.overheadAmount, 0),
-        ]);
-        rows.push([
-          kode,
-          desk,
-          satuanHsp,
-          "—",
-          "",
-          "Harga Akhir (F = D + E)",
-          "",
-          "",
-          "",
-          N(recipe.finalUnitPrice, 0),
-        ]);
-        rows.push(["", "", "", "", "", "", "", "", "", ""]);
-      }
-    }
-  }
-
-  if (rows.length) ws.addRows(rows);
-
-  const dataStart = 3;
-  for (let r = dataStart; r < dataStart + rows.length; r++) {
-    const row = ws.getRow(r);
-    row.eachCell((c, ci) => {
-      c.border = BORDER_THIN as any;
-      if ([8, 9, 10].includes(ci)) c.alignment = { horizontal: "right" };
-      if ([2, 6].includes(ci)) c.alignment = { wrapText: true };
-    });
-    if ((r - dataStart) % 2 === 1)
-      row.fill = {
-        type: "pattern",
-        pattern: "solid",
-        fgColor: { argb: COLORS.zebra },
-      };
-  }
-
-  return ws;
-}
-
-function addSheetMasterItemDipakai(
-  wb: ExcelJS.Workbook,
-  est: EstimationWithRelations
-) {
-  const ws = wb.addWorksheet("Master Item Dipakai", {
-    views: [{ state: "frozen", ySplit: 2 }],
-    pageSetup: {
-      orientation: "landscape",
-      fitToPage: true,
-      fitToWidth: 1,
-      fitToHeight: 0,
-    },
-    properties: { defaultRowHeight: 18 },
-  });
-
-  ws.columns = [
-    { header: "Kode", key: "code", width: 18 },
-    { header: "Nama", key: "name", width: 40 },
-    { header: "Satuan", key: "unit", width: 12 },
-    { header: "Tipe", key: "type", width: 16 },
-    {
-      header: "Harga (Master)",
-      key: "price",
-      width: 18,
-      style: { numFmt: NUMFMT_IDR, alignment: { horizontal: "right" } },
-    },
-    { header: "Dipakai di HSP (unik)", key: "usedIn", width: 18 },
-    {
-      header: "Total Subtotal di AHSP",
-      key: "sum",
-      width: 22,
-      style: { numFmt: NUMFMT_IDR, alignment: { horizontal: "right" } },
-    },
-    { header: "Catatan", key: "notes", width: 28 },
-  ];
-
-  addTitleBarAuto(ws, "Master Item Dipakai");
-
-  const header = ws.getRow(2);
-  header.values = ws.columns.map((c) => (c.header ?? "") as string);
-  header.eachCell((c) => {
-    c.font = FONT.header as any;
-    c.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-    c.fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: COLORS.headerBlue },
-    };
-    c.border = BORDER_THIN as any;
-  });
-
-  type Agg = {
-    code: string;
-    name: string;
-    unit: string;
-    type: string;
-    price: number;
-    usedHsp: Set<string>;
-    sumSubtotal: number;
-    notes?: string | null;
   };
-  const agg = new Map<string, Agg>();
+  const uniqHsp = new Map<string, Block>();
 
   for (const sec of est.items) {
     for (const d of sec.details) {
       const h = d.hspItem;
-      if (!h || !h.ahsp) continue;
-      const hspCode = h.kode || "";
-
-      for (const c of h.ahsp.components || []) {
-        const m = c.masterItem;
-        if (!m) continue;
-        const id = m.id;
-        const eff = N(c.effectiveUnitPrice ?? c.priceOverride ?? m.price, 0);
-        const sub = N(c.subtotal, N(c.coefficient, 1) * eff);
-
-        if (!agg.has(id)) {
-          agg.set(id, {
-            code: m.code,
-            name: c.nameSnapshot || m.name,
-            unit: c.unitSnapshot || m.unit,
-            type: String(m.type),
-            price: N(m.price, 0),
-            usedHsp: new Set<string>(),
-            sumSubtotal: 0,
-            notes: m.notes ?? undefined,
-          });
-        }
-        const a = agg.get(id)!;
-        a.usedHsp.add(hspCode);
-        a.sumSubtotal += sub;
-      }
+      if (!h) continue;
+      if (!uniqHsp.has(h.id)) uniqHsp.set(h.id, { hsp: h as any });
     }
   }
 
-  const rows = [...agg.values()]
-    .sort((a, b) => a.code.localeCompare(b.code))
-    .map((a) => [
-      a.code,
-      a.name,
-      a.unit,
-      a.type,
-      a.price,
-      a.usedHsp.size,
-      a.sumSubtotal,
-      a.notes || "",
-    ]);
-  if (rows.length) ws.addRows(rows);
+  // Urutkan blok berdasarkan kode
+  const blocks = [...uniqHsp.values()].sort((a, b) =>
+    (a.hsp.kode || "").localeCompare(b.hsp.kode || "")
+  );
 
-  const dataStart = 3;
-  for (let r = dataStart; r < dataStart + rows.length; r++) {
-    const row = ws.getRow(r);
-    row.eachCell((c, ci) => {
-      c.border = BORDER_THIN as any;
-      if ([5, 7].includes(ci)) c.alignment = { horizontal: "right" };
-      if ([2, 8].includes(ci)) c.alignment = { wrapText: true };
-    });
-    if ((r - dataStart) % 2 === 1)
-      row.fill = {
-        type: "pattern",
-        pattern: "solid",
-        fgColor: { argb: COLORS.zebra },
+  let rowIdx = 2;
+  let idx = 1;
+
+  for (const { hsp } of blocks) {
+    const kode = hsp.kode || "";
+    const desk = hsp.deskripsi || "-";
+    const sat = hsp.satuan || "-";
+    const recipe = hsp.ahsp || null;
+
+    // Hitung subtotal per grup, subtotal ABC, overhead, final
+    const comps = (recipe?.components || []).filter(
+      (c) =>
+        c.group === "LABOR" || c.group === "MATERIAL" || c.group === "EQUIPMENT"
+    );
+
+    const eff = (c: AHSPComponent & { masterItem: MasterItem }) =>
+      N(
+        c.effectiveUnitPrice ??
+          c.priceOverride ??
+          c.unitPriceSnapshot ??
+          c.masterItem?.price,
+        0
+      );
+
+    const sub = (c: AHSPComponent & { masterItem: MasterItem }) =>
+      N(c.subtotal, N(c.coefficient, 1) * eff(c));
+
+    const sumGroup = (g: AHSPComponentGroup) =>
+      comps.filter((c) => c.group === g).reduce((acc, c) => acc + sub(c), 0);
+
+    const subtotalA = sumGroup("LABOR");
+    const subtotalB = sumGroup("MATERIAL");
+    const subtotalC = sumGroup("EQUIPMENT");
+    const subtotalABC = N(
+      recipe?.subtotalABC,
+      subtotalA + subtotalB + subtotalC
+    );
+
+    const ohPct = N(recipe?.overheadPercent, 10);
+    const overheadAmount = N(
+      recipe?.overheadAmount,
+      Math.round((ohPct / 100) * subtotalABC)
+    );
+    const finalUnitPrice = N(
+      recipe?.finalUnitPrice,
+      subtotalABC + overheadAmount
+    );
+
+    // ===== Ringkasan baris: No | Kode | Deskripsi | Satuan | Harga Satuan (Rp.)
+    {
+      const r = ws.getRow(rowIdx++);
+      r.getCell(1).value = idx++;
+      r.getCell(2).value = desk;
+      r.getCell(3).value = kode;
+      r.getCell(4).value = sat;
+      r.getCell(5).value = "Harga Satuan (Rp.)";
+      r.getCell(6).value = finalUnitPrice;
+      r.getCell(6).numFmt = NUMFMT_IDR;
+      // style
+      [1, 2, 3, 4, 5, 6, 7].forEach(
+        (ci) => (r.getCell(ci).border = BORDER_THIN as any)
+      );
+      [1, 3, 4, 5, 6].forEach(
+        (ci) =>
+          (r.getCell(ci).alignment = {
+            vertical: "middle",
+            horizontal: ci === 6 ? "right" : "center",
+            wrapText: true,
+          })
+      );
+      r.getCell(2).alignment = {
+        vertical: "middle",
+        horizontal: "left",
+        wrapText: true,
       };
+      r.eachCell((c) => {
+        c.font = { ...(FONT.base as any), bold: true };
+        c.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: COLORS.lightBlue },
+        };
+      });
+    }
+
+    // ===== Header breakdown
+    {
+      const r = ws.getRow(rowIdx++);
+      r.values = [
+        "No",
+        "Uraian",
+        "Kode",
+        "Satuan",
+        "Koefisien",
+        "Harga Satuan (Rp.)",
+        "Jumlah Harga (Rp.)",
+      ];
+      r.eachCell((c) => {
+        c.font = FONT.header as any;
+        c.alignment = {
+          vertical: "middle",
+          horizontal: "center",
+          wrapText: true,
+        };
+        c.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: COLORS.headerBlue },
+        };
+        c.border = BORDER_THIN as any;
+      });
+    }
+
+    // ===== Per grup (A/B/C)
+    for (const g of groups) {
+      // Baris judul grup: "A" | "TENAGA"
+      {
+        const r = ws.getRow(rowIdx++);
+        r.getCell(1).value = g.letter;
+        r.getCell(2).value = g.title;
+        ws.mergeCells(`B${r.number}:G${r.number}`);
+        r.eachCell((c) => {
+          c.font = { ...(FONT.base as any), bold: true };
+          c.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: COLORS.lightBlue },
+          };
+          c.border = BORDER_THIN as any;
+        });
+        r.getCell(1).alignment = { vertical: "middle", horizontal: "center" };
+        r.getCell(2).alignment = { vertical: "middle", horizontal: "left" };
+      }
+
+      const rowsStart = rowIdx;
+      const compsG = comps.filter((c) => c.group === g.key);
+
+      // Isi komponen
+      for (const c of compsG) {
+        const r = ws.getRow(rowIdx++);
+        // "No" pada rincian dibiarkan kosong (mengikuti contoh)
+        r.getCell(2).value = c.nameSnapshot || c.masterItem?.name || "-";
+        r.getCell(3).value = c.masterItem?.code || "";
+        r.getCell(4).value = c.unitSnapshot || c.masterItem?.unit || "";
+        r.getCell(5).value = N(c.coefficient, 1);
+        r.getCell(6).value = eff(c);
+        r.getCell(7).value = sub(c);
+        r.getCell(6).numFmt = NUMFMT_IDR;
+        r.getCell(7).numFmt = NUMFMT_IDR;
+
+        r.eachCell((cell, ci) => {
+          cell.border = BORDER_THIN as any;
+          if (ci === 2) cell.alignment = { wrapText: true };
+          if ([5, 6, 7].includes(ci)) cell.alignment = { horizontal: "right" };
+        });
+
+        if ((rowIdx - rowsStart) % 2 === 0)
+          r.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: COLORS.zebra },
+          };
+      }
+
+      // Subtotal grup
+      {
+        const sum = compsG.reduce((acc, c) => acc + sub(c), 0);
+        const r = ws.getRow(rowIdx++);
+        // Kosongkan kolom 1–2, taruh label di kolom 3-6 agar panjang
+        r.getCell(3).value = g.subLabel;
+        ws.mergeCells(`C${r.number}:F${r.number}`);
+        r.getCell(7).value = sum || "-";
+        if (sum) r.getCell(7).numFmt = NUMFMT_IDR;
+
+        r.eachCell((cell) => {
+          cell.border = BORDER_THIN as any;
+          cell.font = { ...(FONT.base as any), bold: true };
+        });
+        r.getCell(3).alignment = { horizontal: "right" };
+        r.getCell(7).alignment = { horizontal: sum ? "right" : "center" };
+      }
+    }
+
+    // D / E / F
+    {
+      // D
+      const rD = ws.getRow(rowIdx++);
+      rD.getCell(3).value = "Jumlah (A+B+C)";
+      ws.mergeCells(`C${rD.number}:F${rD.number}`);
+      rD.getCell(7).value = subtotalABC || "-";
+      if (subtotalABC) rD.getCell(7).numFmt = NUMFMT_IDR;
+      rD.eachCell((c) => {
+        c.border = BORDER_THIN as any;
+        c.font = { ...(FONT.base as any), bold: true };
+      });
+      rD.getCell(3).alignment = { horizontal: "right" };
+      rD.getCell(7).alignment = {
+        horizontal: subtotalABC ? "right" : "center",
+      };
+
+      // E
+      const rE = ws.getRow(rowIdx++);
+      rE.getCell(3).value = `Overhead & Profit ${ohPct}%`;
+      ws.mergeCells(`C${rE.number}:F${rE.number}`);
+      rE.getCell(7).value = overheadAmount || "-";
+      if (overheadAmount) rE.getCell(7).numFmt = NUMFMT_IDR;
+      rE.eachCell((c) => {
+        c.border = BORDER_THIN as any;
+        c.font = { ...(FONT.base as any), bold: true };
+      });
+      rE.getCell(3).alignment = { horizontal: "right" };
+      rE.getCell(7).alignment = {
+        horizontal: overheadAmount ? "right" : "center",
+      };
+
+      // F
+      const rF = ws.getRow(rowIdx++);
+      rF.getCell(3).value = "Harga Satuan Pekerjaan (D+E)";
+      ws.mergeCells(`C${rF.number}:F${rF.number}`);
+      rF.getCell(7).value = finalUnitPrice || "-";
+      if (finalUnitPrice) rF.getCell(7).numFmt = NUMFMT_IDR;
+      rF.eachCell((c) => {
+        c.border = BORDER_THIN as any;
+        c.font = { ...(FONT.base as any), bold: true };
+      });
+      rF.getCell(3).alignment = { horizontal: "right" };
+      rF.getCell(7).alignment = {
+        horizontal: finalUnitPrice ? "right" : "center",
+      };
+    }
+
+    // Spasi antar blok
+    rowIdx++;
   }
 
   return ws;
@@ -1028,13 +1065,14 @@ export async function buildEstimationExcel(
     currentRow++;
   });
 
-  /** ========= Sheet lain (tanpa logo + judul auto) ========= */
+  /** ========= Sheets lain ========= */
   addSheetKategoriDipakai(wb, est);
   addSheetJobItemDipakai(wb, est);
-  addSheetVolume(wb, est);
-  addSheetAHSPDipakai(wb, est);
-  addSheetMasterItemDipakai(wb, est);
+  addSheetVolumeDetailed(wb, est); // ⬅️ Volume detail dengan kolom P, L, T, dst.
+  addSheetAHSP(wb, est); // ⬅️ AHSP breakdown per item (A/B/C, D/E/F)
+  // ⛔️ Tidak membuat sheet "Master Item Dipakai" (dihapus sesuai permintaan)
 
+  // Font default fallback
   wb.worksheets.forEach((sh) => {
     sh.eachRow((row) =>
       row.eachCell((cell) => (cell.font = cell.font || (FONT.base as any)))

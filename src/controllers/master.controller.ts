@@ -1,6 +1,8 @@
 import { Request, Response } from "express";
 import prisma from "../lib/prisma";
 import { scopeOf } from "../lib/_scoping";
+import { pickEffective } from "../lib/_override";
+import { normalizeRole } from "../lib/authz";
 
 const toFloat = (v: any, def = 0) => {
   const n = parseFloat(String(v ?? ""));
@@ -25,14 +27,112 @@ const autoCode = (type: "LABOR" | "MATERIAL" | "EQUIPMENT" | "OTHER") => {
           : "LAB";
   return `${prefix}-${rand6()}`;
 };
+type Role = "ADMIN" | "USER";
 
-/** LIST GENERIC BY TYPE (merge user + global) */
-export const listMasterGeneric = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+async function getAuth(
+  req: Request
+): Promise<{ userId?: string; role?: Role }> {
+  const anyReq = req as any;
+  const userId = anyReq.user?.id || anyReq.userId || undefined;
+
+  let role =
+    normalizeRole(anyReq.user?.role) ||
+    normalizeRole(anyReq.userRole) ||
+    undefined;
+
+  if (!role && userId) {
+    const u = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    role = normalizeRole(u?.role);
+  }
+  return { userId, role };
+}
+async function getRole(req: Request): Promise<Role | undefined> {
+  const anyReq = req as any;
+  const r =
+    (anyReq.user?.role && String(anyReq.user.role).toUpperCase()) ||
+    (anyReq.userRole && String(anyReq.userRole).toUpperCase());
+  if (r === "ADMIN" || r === "USER") return r as Role;
+
+  const uid = anyReq.user?.id || anyReq.userId;
+  if (uid) {
+    const row = await prisma.user.findUnique({
+      where: { id: uid },
+      select: { role: true },
+    });
+    const rr = row?.role && String(row.role).toUpperCase();
+    if (rr === "ADMIN" || rr === "USER") return rr as Role;
+  }
+  return undefined;
+}
+function chooseEffective(
+  viewerRole: Role | undefined,
+  u?: { isDeleted: boolean; isDisabled: boolean } | null,
+  g?: { isDeleted: boolean } | null
+): {
+  chosen?: any;
+  meta: {
+    source: "USER" | "ADMIN";
+    hasUserOverride: boolean;
+    userActive: boolean;
+  };
+} {
+  const hasUser = !!u && !u.isDeleted;
+  const userActive = !!u && !u.isDeleted && !u.isDisabled;
+  const hasGlobal = !!g && !g.isDeleted;
+
+  if (!!u && u.isDeleted) {
+    return {
+      chosen: undefined,
+      meta: {
+        source: viewerRole === "ADMIN" ? "ADMIN" : "USER",
+        hasUserOverride: true,
+        userActive: false,
+      },
+    };
+  }
+
+  if (userActive) {
+    return {
+      chosen: u!,
+      meta: {
+        source: viewerRole === "ADMIN" ? "ADMIN" : "USER",
+        hasUserOverride: true,
+        userActive: true,
+      },
+    };
+  }
+
+  if (hasGlobal) {
+    return {
+      chosen: g!,
+      meta: { source: "ADMIN", hasUserOverride: !!u, userActive: false },
+    };
+  }
+
+  if (hasUser) {
+    return {
+      chosen: u!,
+      meta: {
+        source: viewerRole === "ADMIN" ? "ADMIN" : "USER",
+        hasUserOverride: true,
+        userActive: false,
+      },
+    };
+  }
+
+  return {
+    chosen: undefined,
+    meta: { source: "ADMIN", hasUserOverride: false, userActive: false },
+  };
+}
+
+/** LIST GENERIC BY TYPE (effective + meta) */
+export const listMasterGeneric = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.id as string | undefined;
+    const { userId, role } = await getAuth(req);
     const userScope = scopeOf(userId);
 
     const raw = (req.query.type as string) || "";
@@ -40,11 +140,13 @@ export const listMasterGeneric = async (
       ? (raw as any)
       : undefined;
     if (!type) {
-      res.status(400).json({
-        status: "error",
-        error:
-          "Query parameter 'type' is required (LABOR|MATERIAL|EQUIPMENT|OTHER)",
-      });
+      res
+        .status(400)
+        .json({
+          status: "error",
+          error:
+            "Query parameter 'type' is required (LABOR|MATERIAL|EQUIPMENT|OTHER)",
+        });
       return;
     }
 
@@ -57,24 +159,37 @@ export const listMasterGeneric = async (
     const orderByField = (req.query.orderBy as string) || "code";
     const orderDir = (req.query.orderDir as string) === "desc" ? "desc" : "asc";
 
-    const where: any = { type };
+    // ⬅️ USER: TANPA filter isDeleted (agar tombstone bisa menyembunyikan GLOBAL)
+    const whereUser: any = { type, scope: userScope };
+    // ⬅️ GLOBAL: tetap buang yang isDeleted
+    const whereGlobal: any = { type, scope: "GLOBAL", isDeleted: false };
+
     if (q) {
-      where.OR = [
+      const OR = [
         { code: { contains: q, mode: "insensitive" } },
         { name: { contains: q, mode: "insensitive" } },
         { unit: { contains: q, mode: "insensitive" } },
       ];
+      whereUser.OR = OR;
+      whereGlobal.OR = OR;
     }
 
     const [rowsUser, rowsGlobal] = await Promise.all([
-      prisma.masterItem.findMany({ where: { ...where, scope: userScope } }),
-      prisma.masterItem.findMany({ where: { ...where, scope: "GLOBAL" } }),
+      prisma.masterItem.findMany({ where: whereUser }),
+      prisma.masterItem.findMany({ where: whereGlobal }),
     ]);
 
-    const map = new Map<string, any>();
-    for (const g of rowsGlobal) map.set(g.code, g);
-    for (const u of rowsUser) map.set(u.code, u);
-    let data = Array.from(map.values());
+    const mapU = new Map(rowsUser.map((r) => [r.code, r]));
+    const mapG = new Map(rowsGlobal.map((r) => [r.code, r]));
+    const codes = new Set([...mapU.keys(), ...mapG.keys()]);
+
+    // pakai resolver efektif yang kamu punya (pickEffective) atau logika sejenis
+    let data = Array.from(codes)
+      .map((code) => {
+        const { chosen, meta } = pickEffective(mapU.get(code), mapG.get(code));
+        return chosen ? { ...chosen, meta } : null;
+      })
+      .filter(Boolean) as any[];
 
     data.sort((a, b) => {
       const dir = orderDir === "desc" ? -1 : 1;
@@ -90,35 +205,34 @@ export const listMasterGeneric = async (
       status: "success",
       data,
       pagination: { skip, take, total },
-      meta: { type },
+      meta: { type, viewerRole: role },
     });
-    return;
   } catch (e: any) {
-    res.status(500).json({
-      status: "error",
-      error: `Failed to fetch master items`,
-      detail: e?.message,
-    });
-    return;
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: `Failed to fetch master items`,
+        detail: e?.message,
+      });
   }
 };
 
-export const createMasterItem = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+export const createMasterItem = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.id as string | undefined;
-    const scope = scopeOf(userId);
+    const { userId, role } = await getAuth(req);
+    const userScope = scopeOf(userId);
 
     const { code, name, unit, price, type, hourlyRate, dailyRate, notes } =
       req.body;
 
     if (!isStr(name) || !isStr(unit) || !isValidType(type)) {
-      res.status(400).json({
-        status: "error",
-        error: "name, unit, and valid type are required",
-      });
+      res
+        .status(400)
+        .json({
+          status: "error",
+          error: "name, unit, and valid type are required",
+        });
       return;
     }
 
@@ -134,6 +248,7 @@ export const createMasterItem = async (
       if (!isStr(finalCode)) finalCode = autoCode(type);
     }
 
+    // hitung price utk LABOR
     let priceNum = toFloat(price, NaN);
     const hr = hourlyRate !== undefined ? toFloat(hourlyRate, NaN) : NaN;
     const dr = dailyRate !== undefined ? toFloat(dailyRate, NaN) : NaN;
@@ -142,16 +257,21 @@ export const createMasterItem = async (
       else if (Number.isFinite(hr)) priceNum = hr;
     }
     if (!Number.isFinite(priceNum) || priceNum < 0) {
-      res.status(400).json({
-        status: "error",
-        error:
-          "price must be a non-negative number (or provide dailyRate/hourlyRate for LABOR)",
-      });
+      res
+        .status(400)
+        .json({
+          status: "error",
+          error:
+            "price must be a non-negative number (or provide dailyRate/hourlyRate for LABOR)",
+        });
       return;
     }
 
+    // ⬅️ KUNCI: admin → GLOBAL, user → userScope
+    const targetScope = role === "ADMIN" ? "GLOBAL" : userScope;
+
     const data: any = {
-      scope,
+      scope: targetScope,
       code: norm(finalCode),
       name: norm(name),
       unit: norm(unit),
@@ -165,29 +285,32 @@ export const createMasterItem = async (
       data.dailyRate = toFloat(dailyRate, null as any);
 
     const created = await prisma.masterItem.create({ data });
-    res.status(201).json({ status: "success", data: created });
-    return;
+    res.status(201).json({
+      status: "success",
+      data: created,
+      _debug: { role, targetScope }, // ⬅️ supaya kamu bisa lihat peran & scope saat create
+    });
   } catch (e: any) {
     if (e?.code === "P2002") {
-      res.status(409).json({
-        status: "error",
-        error: "Duplicate code. 'code' must be unique in your scope.",
-      });
+      res
+        .status(409)
+        .json({
+          status: "error",
+          error: "Duplicate code. 'code' must be unique in your scope.",
+        });
       return;
     }
-    res.status(500).json({
-      status: "error",
-      error: "Failed to create master item",
-      detail: e?.message,
-    });
-    return;
+    res
+      .status(500)
+      .json({
+        status: "error",
+        error: "Failed to create master item",
+        detail: e?.message,
+      });
   }
 };
 
-export const getMasterItem = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+export const getMasterItem = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const item = await prisma.masterItem.findUnique({
@@ -199,21 +322,16 @@ export const getMasterItem = async (
       return;
     }
     res.status(200).json({ status: "success", data: item });
-    return;
   } catch (e: any) {
     res.status(500).json({
       status: "error",
       error: "Failed to fetch master item",
       detail: e?.message,
     });
-    return;
   }
 };
 
-export const updateMasterItem = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+export const updateMasterItem = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const recompute =
@@ -311,7 +429,6 @@ export const updateMasterItem = async (
       data: updated,
       meta: { recomputed: recompute },
     });
-    return;
   } catch (e: any) {
     if (e?.code === "P2002") {
       res.status(409).json({
@@ -325,14 +442,10 @@ export const updateMasterItem = async (
       error: "Failed to update master item",
       detail: e?.message,
     });
-    return;
   }
 };
 
-export const deleteMasterItem = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+export const deleteMasterItem = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
@@ -356,14 +469,12 @@ export const deleteMasterItem = async (
 
     await prisma.masterItem.delete({ where: { id } });
     res.status(200).json({ status: "success", data: { id, deleted: true } });
-    return;
   } catch (e: any) {
     res.status(500).json({
       status: "error",
       error: "Failed to delete master item",
       detail: e?.message,
     });
-    return;
   }
 };
 
@@ -429,10 +540,7 @@ async function recomputeRecipesUsingMasterItem(masterItemId: string) {
   }
 }
 
-export const getMasterItemByCode = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+export const getMasterItemByCode = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.id as string | undefined;
     const userScope = scopeOf(userId);
@@ -462,25 +570,18 @@ export const getMasterItemByCode = async (
     }
 
     res.status(200).json({ status: "success", data: item });
-    return;
   } catch (e: any) {
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to fetch by code",
-        detail: e?.message,
-      });
-    return;
+    res.status(500).json({
+      status: "error",
+      error: "Failed to fetch by code",
+      detail: e?.message,
+    });
   }
 };
 
-export const updateMasterItemByCode = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+export const updateMasterItemByCode = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.id as string | undefined;
+    const { userId, role } = await getAuth(req);
     if (!userId) {
       res.status(401).json({ status: "error", error: "Unauthorized" });
       return;
@@ -493,10 +594,32 @@ export const updateMasterItemByCode = async (
       return;
     }
 
+    if (role === "ADMIN") {
+      const g = await prisma.masterItem.findUnique({
+        where: { scope_code_unique: { scope: "GLOBAL", code } },
+      });
+      if (!g || g.isDeleted) {
+        res.status(404).json({ status: "error", error: "Global item not found" });
+        return;
+      }
+
+      const payload: any = {};
+      if (req.body.name !== undefined) payload.name = String(req.body.name).trim();
+      if (req.body.unit !== undefined) payload.unit = String(req.body.unit).trim();
+      if (req.body.price !== undefined) payload.price = Number(req.body.price);
+      if (req.body.notes !== undefined) payload.notes = req.body.notes ? String(req.body.notes) : null;
+      if (req.body.hourlyRate !== undefined) payload.hourlyRate = Number(req.body.hourlyRate);
+      if (req.body.dailyRate !== undefined) payload.dailyRate = Number(req.body.dailyRate);
+      if (req.body.type !== undefined) payload.type = String(req.body.type);
+
+      const updated = await prisma.masterItem.update({ where: { id: g.id }, data: payload });
+      res.status(200).json({ status: "success", data: updated, _debug: { role, scope: "GLOBAL" } });
+      return;
+    }
+
+    // USER → copy-on-write (override)
     let userItem = await prisma.masterItem
-      .findUnique({
-        where: { scope_code_unique: { scope: userScope, code } },
-      })
+      .findUnique({ where: { scope_code_unique: { scope: userScope, code } } })
       .catch(() => null);
 
     if (!userItem) {
@@ -519,54 +642,35 @@ export const updateMasterItemByCode = async (
           dailyRate: base.dailyRate,
           notes: base.notes,
           isDeleted: false,
+          isDisabled: false,
         },
       });
     }
 
     const payload: any = {};
-    if (req.body.name !== undefined)
-      payload.name = String(req.body.name).trim();
-    if (req.body.unit !== undefined)
-      payload.unit = String(req.body.unit).trim();
+    if (req.body.name !== undefined) payload.name = String(req.body.name).trim();
+    if (req.body.unit !== undefined) payload.unit = String(req.body.unit).trim();
     if (req.body.price !== undefined) payload.price = Number(req.body.price);
-    if (req.body.notes !== undefined)
-      payload.notes = req.body.notes ? String(req.body.notes) : null;
-    if (req.body.hourlyRate !== undefined)
-      payload.hourlyRate = Number(req.body.hourlyRate);
-    if (req.body.dailyRate !== undefined)
-      payload.dailyRate = Number(req.body.dailyRate);
+    if (req.body.notes !== undefined) payload.notes = req.body.notes ? String(req.body.notes) : null;
+    if (req.body.hourlyRate !== undefined) payload.hourlyRate = Number(req.body.hourlyRate);
+    if (req.body.dailyRate !== undefined) payload.dailyRate = Number(req.body.dailyRate);
     if (req.body.type !== undefined) payload.type = String(req.body.type);
     payload.isDeleted = false;
+    payload.isDisabled = false;
 
-    const updated = await prisma.masterItem.update({
-      where: { id: userItem.id },
-      data: payload,
-    });
-
-    res.status(200).json({ status: "success", data: updated });
-    return;
+    const updated = await prisma.masterItem.update({ where: { id: userItem.id }, data: payload });
+    res.status(200).json({ status: "success", data: updated, _debug: { role, scope: userScope } });
   } catch (e: any) {
     if (e?.code === "P2002") {
-      res
-        .status(409)
-        .json({ status: "error", error: "Duplicate code in your scope" });
+      res.status(409).json({ status: "error", error: "Duplicate code in your scope" });
       return;
     }
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to update by code",
-        detail: e?.message,
-      });
-    return;
+    res.status(500).json({ status: "error", error: "Failed to update by code", detail: e?.message });
   }
 };
 
-export const deleteMasterItemByCode = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
+
+export const deleteMasterItemByCode = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.id as string | undefined;
     if (!userId) {
@@ -582,9 +686,7 @@ export const deleteMasterItemByCode = async (
     }
 
     const userItem = await prisma.masterItem
-      .findUnique({
-        where: { scope_code_unique: { scope: userScope, code } },
-      })
+      .findUnique({ where: { scope_code_unique: { scope: userScope, code } } })
       .catch(() => null);
 
     if (userItem) {
@@ -592,12 +694,10 @@ export const deleteMasterItemByCode = async (
         where: { id: userItem.id },
         data: { isDeleted: true },
       });
-      res
-        .status(200)
-        .json({
-          status: "success",
-          message: "Item hidden (deleted) in your scope",
-        });
+      res.status(200).json({
+        status: "success",
+        message: "Item hidden (deleted) in your scope",
+      });
       return;
     }
 
@@ -628,15 +728,80 @@ export const deleteMasterItemByCode = async (
     res
       .status(200)
       .json({ status: "success", message: "Item hidden for this user" });
+  } catch (e: any) {
+    res.status(500).json({
+      status: "error",
+      error: "Failed to delete by code",
+      detail: e?.message,
+    });
+  }
+};
+
+/** PATCH /hsp/master/by-code/:code/override/active  { active: boolean } */
+export const setMasterOverrideActive = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = (req as any).user?.id as string | undefined;
+    if (!userId) {
+      res.status(401).json({ status: "error", error: "Unauthorized" });
+      return;
+    }
+    const scope = scopeOf(userId);
+
+    const code = decodeURIComponent(String(req.params.code || "").trim());
+    const active = !!req.body?.active;
+    if (!code) {
+      res.status(400).json({ status: "error", error: "Missing code" });
+      return;
+    }
+
+    let u = await prisma.masterItem
+      .findUnique({ where: { scope_code_unique: { scope, code } } })
+      .catch(() => null);
+
+    if (!u) {
+      const g = await prisma.masterItem.findUnique({
+        where: { scope_code_unique: { scope: "GLOBAL", code } },
+      });
+      if (!g || g.isDeleted) {
+        res
+          .status(404)
+          .json({ status: "error", error: "Master item not found" });
+        return;
+      }
+
+      await prisma.masterItem.create({
+        data: {
+          scope,
+          code: g.code,
+          name: g.name,
+          unit: g.unit,
+          price: g.price,
+          type: g.type,
+          hourlyRate: g.hourlyRate,
+          dailyRate: g.dailyRate,
+          notes: g.notes ?? null,
+          isDeleted: false,
+          isDisabled: !active,
+        },
+      });
+    } else {
+      await prisma.masterItem.update({
+        where: { id: u.id },
+        data: { isDisabled: !active, isDeleted: false },
+      });
+    }
+
+    res.status(200).json({ status: "success", data: { code, active } });
     return;
   } catch (e: any) {
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to delete by code",
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to set master override state",
+      detail: e?.message,
+    });
     return;
   }
 };
