@@ -54,8 +54,8 @@ export type HSPLike = {
 };
 
 export type BuildAhspPdfInput = {
-  title: string;        // "AHSP Dipakai"
-  subtitle?: string;    // project • owner
+  title: string; // "AHSP Dipakai"
+  subtitle?: string; // project • owner
   blocks: Array<{ hsp: HSPLike }>;
   logo?: LogoOpt;
   pageSize?: "A4" | "A3" | "LEGAL";
@@ -112,7 +112,10 @@ const N = (v: any, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
 function eff(c: ComponentLike) {
   return N(
-    c.effectiveUnitPrice ?? c.priceOverride ?? c.unitPriceSnapshot ?? c.masterItem?.price,
+    c.effectiveUnitPrice ??
+      c.priceOverride ??
+      c.unitPriceSnapshot ??
+      c.masterItem?.price,
     0
   );
 }
@@ -206,10 +209,30 @@ export async function buildAhspPdf(opts: BuildAhspPdfInput): Promise<Buffer> {
     { text: "Jumlah Harga (Rp.)", style: "tblHeader", alignment: "center" },
   ];
 
-  const groups: Array<{ key: AHSPComponentGroup; letter: "A" | "B" | "C"; title: string; subLabel: string; }> = [
-    { key: "LABOR", letter: "A", title: "TENAGA",    subLabel: "JUMLAH TENAGA KERJA" },
-    { key: "MATERIAL", letter: "B", title: "BAHAN",  subLabel: "JUMLAH HARGA BAHAN" },
-    { key: "EQUIPMENT", letter: "C", title: "PERALATAN", subLabel: "JUMLAH HARGA ALAT" },
+  const groups: Array<{
+    key: AHSPComponentGroup;
+    letter: "A" | "B" | "C";
+    title: string;
+    subLabel: string;
+  }> = [
+    {
+      key: "LABOR",
+      letter: "A",
+      title: "TENAGA",
+      subLabel: "JUMLAH TENAGA KERJA",
+    },
+    {
+      key: "MATERIAL",
+      letter: "B",
+      title: "BAHAN",
+      subLabel: "JUMLAH HARGA BAHAN",
+    },
+    {
+      key: "EQUIPMENT",
+      letter: "C",
+      title: "PERALATAN",
+      subLabel: "JUMLAH HARGA ALAT",
+    },
   ];
 
   const content: any[] = [headerTitle, headerLine];
@@ -223,7 +246,8 @@ export async function buildAhspPdf(opts: BuildAhspPdfInput): Promise<Buffer> {
     const recipe = hsp.ahsp || null;
 
     const comps = (recipe?.components || []).filter(
-      (c) => c.group === "LABOR" || c.group === "MATERIAL" || c.group === "EQUIPMENT"
+      (c) =>
+        c.group === "LABOR" || c.group === "MATERIAL" || c.group === "EQUIPMENT"
     );
 
     const sumGroup = (g: AHSPComponentGroup) =>
@@ -232,11 +256,20 @@ export async function buildAhspPdf(opts: BuildAhspPdfInput): Promise<Buffer> {
     const subtotalA = sumGroup("LABOR");
     const subtotalB = sumGroup("MATERIAL");
     const subtotalC = sumGroup("EQUIPMENT");
-    const subtotalABC = N(recipe?.subtotalABC, subtotalA + subtotalB + subtotalC);
+    const subtotalABC = N(
+      recipe?.subtotalABC,
+      subtotalA + subtotalB + subtotalC
+    );
 
     const ohPct = N(recipe?.overheadPercent, 10);
-    const overheadAmount = N(recipe?.overheadAmount, Math.round((ohPct / 100) * subtotalABC));
-    const finalUnitPrice = N(recipe?.finalUnitPrice, subtotalABC + overheadAmount);
+    const overheadAmount = N(
+      recipe?.overheadAmount,
+      Math.round((ohPct / 100) * subtotalABC)
+    );
+    const finalUnitPrice = N(
+      recipe?.finalUnitPrice,
+      subtotalABC + overheadAmount
+    );
 
     // Ringkasan baris (No | Deskripsi | Kode | Satuan | "Harga Satuan (Rp.)" | nilai)
     content.push({
@@ -244,12 +277,44 @@ export async function buildAhspPdf(opts: BuildAhspPdfInput): Promise<Buffer> {
         widths: [30, "*", 80, 50, 140, 100],
         body: [
           [
-            { text: String(hspIdx++), style: ["bold", "center"], fillColor: COLORS.lightBlue },
-            { text: desk, style: ["bold", "left"], fillColor: COLORS.lightBlue },
-            { text: kode, style: ["bold", "center"], fillColor: COLORS.lightBlue },
-            { text: sat, style: ["bold", "center"], fillColor: COLORS.lightBlue },
-            { text: "Harga Satuan (Rp.)", style: ["bold", "center"], fillColor: COLORS.lightBlue },
-            { text: finalUnitPrice ? finalUnitPrice.toLocaleString("id-ID") : "-", style: ["bold", "right"], fillColor: COLORS.lightBlue },
+            {
+              text: String(hspIdx++),
+              alignment: "center",
+              bold: true,
+              fillColor: COLORS.lightBlue,
+            },
+            {
+              text: desk,
+              alignment: "left",
+              bold: true,
+              fillColor: COLORS.lightBlue,
+            },
+            {
+              text: kode,
+              alignment: "center",
+              bold: true,
+              fillColor: COLORS.lightBlue,
+            },
+            {
+              text: sat,
+              alignment: "center",
+              bold: true,
+              fillColor: COLORS.lightBlue,
+            },
+            {
+              text: "Harga Satuan (Rp.)",
+              alignment: "center",
+              bold: true,
+              fillColor: COLORS.lightBlue,
+            },
+            {
+              text: finalUnitPrice
+                ? finalUnitPrice.toLocaleString("id-ID")
+                : "-",
+              alignment: "right",
+              bold: true,
+              fillColor: COLORS.lightBlue,
+            },
           ],
         ],
       },
@@ -294,9 +359,24 @@ export async function buildAhspPdf(opts: BuildAhspPdfInput): Promise<Buffer> {
           widths: [30, "*", 70, 55, 60, 100, 110],
           body: [
             [
-              { text: g.letter, alignment: "center", bold: true, fillColor: COLORS.lightBlue },
-              { text: g.title, bold: true, fillColor: COLORS.lightBlue, colSpan: 6, alignment: "left" },
-              {}, {}, {}, {}, {},
+              {
+                text: g.letter,
+                alignment: "center",
+                bold: true,
+                fillColor: COLORS.lightBlue,
+              },
+              {
+                text: g.title,
+                bold: true,
+                fillColor: COLORS.lightBlue,
+                colSpan: 6,
+                alignment: "left",
+              },
+              {},
+              {},
+              {},
+              {},
+              {},
             ],
           ],
         },
@@ -316,13 +396,41 @@ export async function buildAhspPdf(opts: BuildAhspPdfInput): Promise<Buffer> {
       for (const c of compsG) {
         zebra = !zebra;
         rows.push([
-          { text: "", alignment: "center", fillColor: zebra ? COLORS.zebra : undefined },
-          { text: c.nameSnapshot || c.masterItem?.name || "-", alignment: "left", fillColor: zebra ? COLORS.zebra : undefined },
-          { text: c.masterItem?.code || "", alignment: "center", fillColor: zebra ? COLORS.zebra : undefined },
-          { text: c.unitSnapshot || c.masterItem?.unit || "", alignment: "center", fillColor: zebra ? COLORS.zebra : undefined },
-          { text: N(c.coefficient, 1).toLocaleString("id-ID"), alignment: "right", fillColor: zebra ? COLORS.zebra : undefined },
-          { text: eff(c).toLocaleString("id-ID"), alignment: "right", fillColor: zebra ? COLORS.zebra : undefined },
-          { text: sub(c).toLocaleString("id-ID"), alignment: "right", fillColor: zebra ? COLORS.zebra : undefined },
+          {
+            text: "",
+            alignment: "center",
+            fillColor: zebra ? COLORS.zebra : undefined,
+          },
+          {
+            text: c.nameSnapshot || c.masterItem?.name || "-",
+            alignment: "left",
+            fillColor: zebra ? COLORS.zebra : undefined,
+          },
+          {
+            text: c.masterItem?.code || "",
+            alignment: "center",
+            fillColor: zebra ? COLORS.zebra : undefined,
+          },
+          {
+            text: c.unitSnapshot || c.masterItem?.unit || "",
+            alignment: "center",
+            fillColor: zebra ? COLORS.zebra : undefined,
+          },
+          {
+            text: N(c.coefficient, 1).toLocaleString("id-ID"),
+            alignment: "right",
+            fillColor: zebra ? COLORS.zebra : undefined,
+          },
+          {
+            text: eff(c).toLocaleString("id-ID"),
+            alignment: "right",
+            fillColor: zebra ? COLORS.zebra : undefined,
+          },
+          {
+            text: sub(c).toLocaleString("id-ID"),
+            alignment: "right",
+            fillColor: zebra ? COLORS.zebra : undefined,
+          },
         ]);
       }
 
@@ -353,11 +461,22 @@ export async function buildAhspPdf(opts: BuildAhspPdfInput): Promise<Buffer> {
             [
               { text: "", border: [true, true, false, true] },
               { text: "", border: [false, true, false, true] },
-              { text: g.subLabel, colSpan: 3, alignment: "right", bold: true, border: [false, true, false, true] },
+              {
+                text: g.subLabel,
+                colSpan: 3,
+                alignment: "right",
+                bold: true,
+                border: [false, true, false, true],
+              },
               {},
               {},
               { text: "", border: [false, true, false, true] },
-              { text: sum ? sum.toLocaleString("id-ID") : "-", alignment: sum ? "right" : "center", bold: true, border: [false, true, true, true] },
+              {
+                text: sum ? sum.toLocaleString("id-ID") : "-",
+                alignment: sum ? "right" : "center",
+                bold: true,
+                border: [false, true, true, true],
+              },
             ],
           ],
         },
@@ -386,11 +505,22 @@ export async function buildAhspPdf(opts: BuildAhspPdfInput): Promise<Buffer> {
         body: rowsDEF.map(({ label, value }) => [
           { text: "", border: [true, true, false, true] },
           { text: "", border: [false, true, false, true] },
-          { text: label, colSpan: 3, alignment: "right", bold: true, border: [false, true, false, true] },
+          {
+            text: label,
+            colSpan: 3,
+            alignment: "right",
+            bold: true,
+            border: [false, true, false, true],
+          },
           {},
           {},
           { text: "", border: [false, true, false, true] },
-          { text: value ? value.toLocaleString("id-ID") : "-", alignment: value ? "right" : "center", bold: true, border: [false, true, true, true] },
+          {
+            text: value ? value.toLocaleString("id-ID") : "-",
+            alignment: value ? "right" : "center",
+            bold: true,
+            border: [false, true, true, true],
+          },
         ]),
       },
       layout: {
@@ -419,7 +549,11 @@ export async function buildAhspPdf(opts: BuildAhspPdfInput): Promise<Buffer> {
     footer: (current: number, total: number) => ({
       columns: [
         { text: "", fontSize: baseFont - 1 },
-        { text: `Hal. ${current}/${total}`, alignment: "right", fontSize: baseFont - 1 },
+        {
+          text: `Hal. ${current}/${total}`,
+          alignment: "right",
+          fontSize: baseFont - 1,
+        },
       ],
       margin: [24, 0, 24, 10],
     }),
