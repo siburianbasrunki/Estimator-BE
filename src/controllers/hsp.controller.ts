@@ -958,13 +958,22 @@ export const createHspCategory = async (req: Request, res: Response) => {
     if (role === "ADMIN") {
       const existsInGlobal = await prisma.hSPCategory.findFirst({
         where: { scope: "GLOBAL", name },
-        select: { id: true },
+        select: { id: true, name: true, scope: true },
       });
 
-      if (seeding || !existsInGlobal) {
-        targetScope = "GLOBAL";
+      // ADMIN: kalau belum ada → buat di GLOBAL; kalau sudah ada → return existing (409 atau 200 up to you)
+      if (!existsInGlobal) {
+        const cat = await prisma.hSPCategory.create({
+          data: { scope: "GLOBAL", name },
+        });
+        res.status(201).json({ status: "success", data: cat });
+        return;
       } else {
-        targetScope = userScope;
+        res.status(409).json({
+          status: "error",
+          error: "Category already exists in GLOBAL",
+        });
+        return;
       }
     }
 
@@ -1120,10 +1129,9 @@ export const createHspItem = async (req: Request, res: Response) => {
 export const updateHspItem = async (req: Request, res: Response) => {
   try {
     const role = await getRole(req);
-    const userScope = userScopeOf(req);
-    const seeding = await isSeedingMode(req);
 
     const { id } = req.params;
+
     const payload: {
       hspCategoryId?: string;
       kode?: string;
@@ -1147,41 +1155,24 @@ export const updateHspItem = async (req: Request, res: Response) => {
       return;
     }
 
-    if (role === "ADMIN" && current.scope === "GLOBAL" && !seeding) {
-      let userItem = await prisma.hSPItem
-        .findUnique({
-          where: {
-            scope_kode_unique: { scope: userScope, kode: current.kode },
-          },
-        })
-        .catch(() => null);
-
-      const targetCategoryId = payload.hspCategoryId
-        ? await resolveCategoryIdForScope(payload.hspCategoryId, userScope)
-        : await resolveCategoryIdForScope(current.hspCategoryId, userScope);
-
-      if (!userItem) {
-        userItem = await prisma.hSPItem.create({
-          data: {
-            scope: userScope,
-            kode: current.kode,
-            deskripsi: current.deskripsi,
-            satuan: current.satuan,
-            harga: current.harga,
-            hspCategoryId: targetCategoryId,
-            isDeleted: false,
-            isDisabled: false,
-          },
-        });
+    if (role === "ADMIN" && current.scope === "GLOBAL") {
+      let targetCategoryId: string | undefined;
+      if (payload.hspCategoryId) {
+        targetCategoryId = await resolveCategoryIdForScope(
+          payload.hspCategoryId,
+          "GLOBAL"
+        );
       }
 
       const updated = await prisma.hSPItem.update({
-        where: { id: userItem.id },
+        where: { id: current.id },
         data: {
           ...(payload.kode ? { kode: payload.kode } : {}),
           ...(payload.deskripsi ? { deskripsi: payload.deskripsi } : {}),
           ...(payload.satuan ? { satuan: payload.satuan } : {}),
-          ...(targetCategoryId ? { hspCategoryId: targetCategoryId } : {}),
+          ...(typeof targetCategoryId === "string"
+            ? { hspCategoryId: targetCategoryId }
+            : {}),
           isDeleted: false,
           isDisabled: false,
         },
@@ -1200,9 +1191,18 @@ export const updateHspItem = async (req: Request, res: Response) => {
       return;
     }
 
+    if (current.scope === "GLOBAL" && role !== "ADMIN") {
+      res.status(403).json({
+        status: "error",
+        error:
+          "Forbidden: only admin can update GLOBAL items. Use override endpoints instead.",
+      });
+      return;
+    }
+
     let targetCategoryId: string | undefined;
     if (payload.hspCategoryId) {
-      const targetScope = current.scope === "GLOBAL" ? "GLOBAL" : userScope;
+      const targetScope = current.scope;
       targetCategoryId = await resolveCategoryIdForScope(
         payload.hspCategoryId,
         targetScope
@@ -1215,7 +1215,11 @@ export const updateHspItem = async (req: Request, res: Response) => {
         ...(payload.kode ? { kode: payload.kode } : {}),
         ...(payload.deskripsi ? { deskripsi: payload.deskripsi } : {}),
         ...(payload.satuan ? { satuan: payload.satuan } : {}),
-        ...(targetCategoryId ? { hspCategoryId: targetCategoryId } : {}),
+        ...(typeof targetCategoryId === "string"
+          ? { hspCategoryId: targetCategoryId }
+          : {}),
+        isDeleted: false,
+        isDisabled: false,
       },
       select: {
         id: true,
