@@ -155,11 +155,11 @@ model HSPItem {
   isDeleted  Boolean @default(false)
   isDisabled Boolean @default(false)
 
-  category      HSPCategory @relation(fields: [hspCategoryId], references: [id], onDelete: Cascade)
+  category      HSPCategory  @relation(fields: [hspCategoryId], references: [id], onDelete: Cascade)
   hspCategoryId String
-
-  ahsp       AHSPRecipe?
-  ItemDetail ItemDetail[]
+  source        String?
+  ahsp          AHSPRecipe?
+  ItemDetail    ItemDetail[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

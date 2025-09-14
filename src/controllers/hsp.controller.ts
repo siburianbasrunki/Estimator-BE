@@ -40,7 +40,8 @@ async function getRole(req: Request): Promise<Role | undefined> {
   return undefined;
 }
 function userScopeOf(req: Request) {
-  const uid = (req as any).user?.id as string | undefined;
+  const anyReq = req as any;
+  const uid = anyReq.user?.id || anyReq.userId;
   return scopeOf(uid);
 }
 
@@ -57,6 +58,23 @@ async function isSeedingMode(req: Request): Promise<boolean> {
   const seed = String((req.query.seed ?? req.body?.seed) || "").toLowerCase();
   if (seed === "1" || seed === "true") return true;
   return await isGlobalBaseEmpty();
+}
+/** ===== Helpers exist-anywhere (GLOBAL atau scope user manapun) ===== */
+async function hspCategoryExistsAnywhere(name: string) {
+  // case-insensitive agar nama sama beda kapital tetap terdeteksi
+  return prisma.hSPCategory.findFirst({
+    where: { name: { equals: name, mode: "insensitive" } },
+    select: { id: true, scope: true },
+  });
+}
+
+async function hspItemExistsAnywhere(kode: string) {
+  // kode biasanya case-sensitive; kalau mau aman bisa samakan kapitalisasi
+  const kodeTrim = String(kode || "").trim();
+  return prisma.hSPItem.findFirst({
+    where: { kode: kodeTrim },
+    select: { id: true, scope: true },
+  });
 }
 
 /** Pastikan categoryId sesuai target scope; kalau beda scope, cari/buat berdasarkan name */
@@ -261,6 +279,7 @@ export const getCategoryWithItems = async (req: Request, res: Response) => {
       hspCategoryId: true,
       isDeleted: true,
       isDisabled: true,
+      source: true,
     } as const;
 
     const [itemsUser, itemsGlobal] = await Promise.all([
@@ -375,6 +394,7 @@ export const listItems = async (req: Request, res: Response) => {
       isDeleted: true,
       isDisabled: true,
       category: { select: { id: true, name: true } },
+      source: true,
     } as const;
 
     const [rowsUser, rowsGlobal] = await Promise.all([
@@ -435,6 +455,7 @@ export const listAllGrouped = async (req: Request, res: Response) => {
     const catWhere: any = {};
     if (q) catWhere.name = { contains: q, mode: "insensitive" as const };
 
+    // Ambil semua kategori di user-scope dan GLOBAL
     const [catsUser, catsGlobal] = await Promise.all([
       prisma.hSPCategory.findMany({
         where: { ...catWhere, scope: userScope },
@@ -446,9 +467,18 @@ export const listAllGrouped = async (req: Request, res: Response) => {
       }),
     ]);
 
+    // Buat index by name
     const byNameUser = new Map(catsUser.map((c) => [c.name, c]));
     const byNameGlobal = new Map(catsGlobal.map((c) => [c.name, c]));
-    const categories = mergeUserOverGlobal(catsUser, catsGlobal, (c) => c.name);
+
+    // >>>>>>> Perubahan utamanya di sini: pakai UNION nama kategori
+    const categoryNames = Array.from(
+      new Set<string>([
+        ...catsGlobal.map((c) => c.name),
+        ...catsUser.map((c) => c.name),
+      ])
+    ).sort((a, b) => a.localeCompare(b));
+    // <<<<<<<
 
     const result: Record<
       string,
@@ -457,6 +487,7 @@ export const listAllGrouped = async (req: Request, res: Response) => {
         deskripsi: string;
         satuan: string;
         harga: number;
+        source: string;
         meta?: any;
       }>
     > = {};
@@ -472,15 +503,21 @@ export const listAllGrouped = async (req: Request, res: Response) => {
       isDeleted: true,
       isDisabled: true,
       hspCategoryId: true,
+      source: true,
     } as const;
 
-    for (const cat of categories) {
-      const uCat = byNameUser.get(cat.name) || null;
-      const gCat = byNameGlobal.get(cat.name) || null;
+    for (const catName of categoryNames) {
+      const uCat = byNameUser.get(catName) || null;
+      const gCat = byNameGlobal.get(catName) || null;
+
+      // Kalau tidak ada di dua-duanya (harusnya tidak mungkin) skip
+      if (!uCat && !gCat) continue;
 
       const whereUser: any = { isDeleted: false, scope: userScope };
       const whereGlobal: any = { isDeleted: false, scope: "GLOBAL" };
 
+      // Penting: user item bisa refer ke category GLOBAL (override lama),
+      // jadi kita cari di kedua id kategori (user & global) sekaligus untuk sisi USER.
       const idsForUser = [uCat?.id, gCat?.id].filter(Boolean) as string[];
       if (idsForUser.length) whereUser.hspCategoryId = { in: idsForUser };
       whereGlobal.hspCategoryId = gCat?.id ?? "__NO_MATCH__";
@@ -515,12 +552,13 @@ export const listAllGrouped = async (req: Request, res: Response) => {
       if (typeof takePerCat === "number") merged = merged.slice(0, takePerCat);
       if (!includeEmpty && merged.length === 0) continue;
 
-      result[cat.name] = merged.map(
-        ({ kode, deskripsi, satuan, harga, meta }: any) => ({
+      result[catName] = merged.map(
+        ({ kode, deskripsi, satuan, harga, meta, source }: any) => ({
           kode,
           deskripsi,
           satuan,
           harga,
+          source,
           meta,
         })
       );
@@ -550,7 +588,6 @@ export const listAllGrouped = async (req: Request, res: Response) => {
     });
   }
 };
-
 /** =========================
  *  DETAIL HSD / AHSP
  *  ========================= */
@@ -576,6 +613,7 @@ export const getHsdDetail = async (req: Request, res: Response) => {
       hspCategoryId: true,
       isDeleted: true,
       isDisabled: true,
+      source: true,
       category: { select: { id: true, name: true } },
       ahsp: {
         include: {
@@ -756,6 +794,7 @@ export const getHsdDetailByKode = async (
       hspCategoryId: true,
       isDeleted: true,
       isDisabled: true,
+      source: true,
       category: { select: { id: true, name: true } },
       ahsp: {
         include: {
@@ -952,41 +991,63 @@ export const createHspCategory = async (req: Request, res: Response) => {
       return;
     }
 
-    const seeding = await isSeedingMode(req);
-    let targetScope = userScope;
-
     if (role === "ADMIN") {
-      const existsInGlobal = await prisma.hSPCategory.findFirst({
-        where: { scope: "GLOBAL", name },
-        select: { id: true, name: true, scope: true },
+      // Cek HANYA di GLOBAL
+      const existsGlobal = await prisma.hSPCategory.findFirst({
+        where: { scope: "GLOBAL", name: { equals: name, mode: "insensitive" } },
+        select: {
+          id: true,
+          scope: true,
+          name: true,
+          createdAt: true,
+          updatedAt: true,
+        },
       });
 
-      // ADMIN: kalau belum ada → buat di GLOBAL; kalau sudah ada → return existing (409 atau 200 up to you)
-      if (!existsInGlobal) {
+      if (!existsGlobal) {
+        // Belum ada di GLOBAL -> buat di GLOBAL
         const cat = await prisma.hSPCategory.create({
           data: { scope: "GLOBAL", name },
         });
-        res.status(201).json({ status: "success", data: cat });
-        return;
-      } else {
-        res.status(409).json({
-          status: "error",
-          error: "Category already exists in GLOBAL",
-        });
+        res
+          .status(201)
+          .json({ status: "success", data: cat, savedTo: "GLOBAL" });
         return;
       }
+
+      // Sudah ada di GLOBAL -> kembalikan yang existing (tidak bikin copy)
+      res.status(200).json({
+        status: "success",
+        data: existsGlobal,
+        existing: true,
+        savedTo: "GLOBAL",
+      });
+      return;
+    }
+
+    // USER biasa: selalu di scope user
+    const existsInMyScope = await prisma.hSPCategory.findFirst({
+      where: { scope: userScope, name: { equals: name, mode: "insensitive" } },
+      select: { id: true },
+    });
+    if (existsInMyScope) {
+      res.status(409).json({
+        status: "error",
+        error: "Category name already exists in your scope",
+      });
+      return;
     }
 
     const cat = await prisma.hSPCategory.create({
-      data: { scope: targetScope, name },
+      data: { scope: userScope, name },
     });
 
-    res.status(201).json({ status: "success", data: cat });
+    res.status(201).json({ status: "success", data: cat, savedTo: userScope });
   } catch (e: any) {
     if (e?.code === "P2002") {
       res.status(409).json({
         status: "error",
-        error: "Category name already exists in your scope",
+        error: "Category name already exists",
       });
       return;
     }
@@ -1054,7 +1115,13 @@ export const createHspItem = async (req: Request, res: Response) => {
     const role = await getRole(req);
     const userScope = userScopeOf(req);
 
-    const { hspCategoryId, kode, deskripsi, satuan } = req.body || {};
+    const {
+      hspCategoryId,
+      kode,
+      deskripsi,
+      satuan,
+      source: sourceRaw,
+    } = req.body || {};
     if (!hspCategoryId || !kode || !deskripsi) {
       res.status(400).json({
         status: "error",
@@ -1064,40 +1131,131 @@ export const createHspItem = async (req: Request, res: Response) => {
     }
 
     const kodeTrim = String(kode).trim();
-    const seeding = await isSeedingMode(req);
-
-    let targetScope = userScope;
-    let targetCategoryId = hspCategoryId;
-
+    const deskripsiTrim = String(deskripsi).trim();
+    const satuanTrim = String(satuan || "").trim();
+    const s = String(sourceRaw || "").trim();
+    const sourceTag = s === "UUD" || s === "Sendiri" ? s : null;
     if (role === "ADMIN") {
+      // Cek HANYA di GLOBAL untuk item
       const existsGlobal = await prisma.hSPItem.findUnique({
         where: { scope_kode_unique: { scope: "GLOBAL", kode: kodeTrim } },
         select: { id: true },
       });
 
-      if (seeding || !existsGlobal) {
-        targetScope = "GLOBAL";
-        targetCategoryId = await resolveCategoryIdForScope(
+      if (!existsGlobal) {
+        // Belum ada di GLOBAL -> buat ke GLOBAL (kategori direlokasi ke GLOBAL)
+        const targetCategoryId = await resolveCategoryIdForScope(
           hspCategoryId,
           "GLOBAL"
         );
-      } else {
-        targetScope = userScope;
-        targetCategoryId = await resolveCategoryIdForScope(
-          hspCategoryId,
-          userScope
-        );
+
+        const created = await prisma.hSPItem.create({
+          data: {
+            scope: "GLOBAL",
+            hspCategoryId: targetCategoryId,
+            kode: kodeTrim,
+            deskripsi: deskripsiTrim,
+            satuan: satuanTrim,
+            harga: 0,
+            isDeleted: false,
+            isDisabled: false,
+            source: sourceTag,
+          },
+          select: {
+            id: true,
+            scope: true,
+            kode: true,
+            deskripsi: true,
+            satuan: true,
+            harga: true,
+            hspCategoryId: true,
+            source: true,
+          },
+        });
+
+        res
+          .status(201)
+          .json({ status: "success", data: created, savedTo: "GLOBAL" });
+        return;
       }
+
+      // Sudah ada di GLOBAL -> buat di scope admin sendiri (override admin)
+      const existsInMyScope = await prisma.hSPItem.findFirst({
+        where: { scope: userScope, kode: kodeTrim },
+        select: { id: true },
+      });
+      if (existsInMyScope) {
+        res.status(409).json({
+          status: "error",
+          error: "Kode already exists in your scope",
+        });
+        return;
+      }
+
+      const targetCategoryId = await resolveCategoryIdForScope(
+        hspCategoryId,
+        userScope
+      );
+
+      const created = await prisma.hSPItem.create({
+        data: {
+          scope: userScope,
+          hspCategoryId: targetCategoryId,
+          kode: kodeTrim,
+          deskripsi: deskripsiTrim,
+          satuan: satuanTrim,
+          harga: 0,
+          isDeleted: false,
+          isDisabled: false,
+          source: sourceTag,
+        },
+        select: {
+          id: true,
+          scope: true,
+          kode: true,
+          deskripsi: true,
+          satuan: true,
+          harga: true,
+          hspCategoryId: true,
+          source: true,
+        },
+      });
+
+      res
+        .status(201)
+        .json({ status: "success", data: created, savedTo: userScope });
+      return;
     }
+
+    // USER biasa → selalu ke scope user
+    const existsInMyScope = await prisma.hSPItem.findFirst({
+      where: { scope: userScope, kode: kodeTrim },
+      select: { id: true },
+    });
+    if (existsInMyScope) {
+      res.status(409).json({
+        status: "error",
+        error: "Kode already exists in your scope",
+      });
+      return;
+    }
+
+    const targetCategoryId = await resolveCategoryIdForScope(
+      hspCategoryId,
+      userScope
+    );
 
     const created = await prisma.hSPItem.create({
       data: {
-        scope: targetScope,
+        scope: userScope,
         hspCategoryId: targetCategoryId,
         kode: kodeTrim,
-        deskripsi: String(deskripsi).trim(),
-        satuan: String(satuan || "").trim(),
+        deskripsi: deskripsiTrim,
+        satuan: satuanTrim,
         harga: 0,
+        isDeleted: false,
+        isDisabled: false,
+        source: sourceTag,
       },
       select: {
         id: true,
@@ -1107,15 +1265,19 @@ export const createHspItem = async (req: Request, res: Response) => {
         satuan: true,
         harga: true,
         hspCategoryId: true,
+        source: true,
       },
     });
 
-    res.status(201).json({ status: "success", data: created });
+    res
+      .status(201)
+      .json({ status: "success", data: created, savedTo: userScope });
   } catch (e: any) {
     if (e?.code === "P2002") {
-      res
-        .status(409)
-        .json({ status: "error", error: "Kode already exists in your scope" });
+      res.status(409).json({
+        status: "error",
+        error: "Kode already exists in target scope",
+      });
       return;
     }
     res.status(500).json({
@@ -1137,6 +1299,7 @@ export const updateHspItem = async (req: Request, res: Response) => {
       kode?: string;
       deskripsi?: string;
       satuan?: string;
+      source?: string | null;
     } = {};
     if (typeof req.body?.hspCategoryId === "string")
       payload.hspCategoryId = req.body.hspCategoryId;
@@ -1145,7 +1308,10 @@ export const updateHspItem = async (req: Request, res: Response) => {
       payload.deskripsi = req.body.deskripsi.trim();
     if (typeof req.body?.satuan === "string")
       payload.satuan = req.body.satuan.trim();
-
+    if (typeof req.body?.source === "string") {
+      const s = req.body.source.trim();
+      payload.source = s === "UUD" || s === "Sendiri" ? s : null;
+    }
     const current = await prisma.hSPItem.findUnique({
       where: { id },
       include: { category: { select: { id: true, name: true, scope: true } } },
@@ -1170,6 +1336,7 @@ export const updateHspItem = async (req: Request, res: Response) => {
           ...(payload.kode ? { kode: payload.kode } : {}),
           ...(payload.deskripsi ? { deskripsi: payload.deskripsi } : {}),
           ...(payload.satuan ? { satuan: payload.satuan } : {}),
+          ...(payload.source !== undefined ? { source: payload.source } : {}),
           ...(typeof targetCategoryId === "string"
             ? { hspCategoryId: targetCategoryId }
             : {}),
@@ -1184,6 +1351,7 @@ export const updateHspItem = async (req: Request, res: Response) => {
           satuan: true,
           harga: true,
           hspCategoryId: true,
+          source: true,
         },
       });
 
@@ -1292,6 +1460,7 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
       kode?: string;
       deskripsi?: string;
       satuan?: string;
+      source?: string | null;
     } = {};
     if (typeof req.body?.hspCategoryId === "string")
       payload.hspCategoryId = req.body.hspCategoryId;
@@ -1301,6 +1470,10 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
     if (typeof req.body?.satuan === "string")
       payload.satuan = req.body.satuan.trim();
 
+    if (typeof req.body?.source === "string") {
+      const s = req.body.source.trim();
+      payload.source = s === "UUD" || s === "Sendiri" ? s : null;
+    }
     let userItem = await prisma.hSPItem
       .findUnique({ where: { scope_kode_unique: { scope: userScope, kode } } })
       .catch(() => null);
@@ -1324,6 +1497,7 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
           hspCategoryId: base.hspCategoryId,
           isDeleted: false,
           isDisabled: false,
+          source: base.source ?? null,
         },
       });
     }
@@ -1339,6 +1513,7 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
         satuan: true,
         harga: true,
         hspCategoryId: true,
+        source: true,
       },
     });
 
@@ -1647,6 +1822,7 @@ export const listAllScopesWithItems = async (req: Request, res: Response) => {
       isDeleted: true,
       isDisabled: true,
       hspCategoryId: true,
+      source: true,
     } as const;
 
     const allItems = await prisma.hSPItem.findMany({
