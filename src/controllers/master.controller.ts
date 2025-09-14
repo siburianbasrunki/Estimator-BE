@@ -15,6 +15,13 @@ const isValidType = (
 ): t is "LABOR" | "MATERIAL" | "EQUIPMENT" | "OTHER" =>
   ["LABOR", "MATERIAL", "EQUIPMENT", "OTHER"].includes(String(t));
 
+async function existsMasterItemAnywhere(code: string) {
+  return prisma.masterItem.findFirst({
+    where: { code: code.trim() },
+    select: { id: true, scope: true },
+  });
+}
+
 const rand6 = () => Math.random().toString(36).slice(2, 8).toUpperCase();
 const autoCode = (type: "LABOR" | "MATERIAL" | "EQUIPMENT" | "OTHER") => {
   const prefix =
@@ -140,13 +147,11 @@ export const listMasterGeneric = async (req: Request, res: Response) => {
       ? (raw as any)
       : undefined;
     if (!type) {
-      res
-        .status(400)
-        .json({
-          status: "error",
-          error:
-            "Query parameter 'type' is required (LABOR|MATERIAL|EQUIPMENT|OTHER)",
-        });
+      res.status(400).json({
+        status: "error",
+        error:
+          "Query parameter 'type' is required (LABOR|MATERIAL|EQUIPMENT|OTHER)",
+      });
       return;
     }
 
@@ -208,13 +213,11 @@ export const listMasterGeneric = async (req: Request, res: Response) => {
       meta: { type, viewerRole: role },
     });
   } catch (e: any) {
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: `Failed to fetch master items`,
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: `Failed to fetch master items`,
+      detail: e?.message,
+    });
   }
 };
 
@@ -227,12 +230,10 @@ export const createMasterItem = async (req: Request, res: Response) => {
       req.body;
 
     if (!isStr(name) || !isStr(unit) || !isValidType(type)) {
-      res
-        .status(400)
-        .json({
-          status: "error",
-          error: "name, unit, and valid type are required",
-        });
+      res.status(400).json({
+        status: "error",
+        error: "name, unit, and valid type are required",
+      });
       return;
     }
 
@@ -248,7 +249,6 @@ export const createMasterItem = async (req: Request, res: Response) => {
       if (!isStr(finalCode)) finalCode = autoCode(type);
     }
 
-    // hitung price utk LABOR
     let priceNum = toFloat(price, NaN);
     const hr = hourlyRate !== undefined ? toFloat(hourlyRate, NaN) : NaN;
     const dr = dailyRate !== undefined ? toFloat(dailyRate, NaN) : NaN;
@@ -257,18 +257,33 @@ export const createMasterItem = async (req: Request, res: Response) => {
       else if (Number.isFinite(hr)) priceNum = hr;
     }
     if (!Number.isFinite(priceNum) || priceNum < 0) {
-      res
-        .status(400)
-        .json({
-          status: "error",
-          error:
-            "price must be a non-negative number (or provide dailyRate/hourlyRate for LABOR)",
-        });
+      res.status(400).json({
+        status: "error",
+        error:
+          "price must be a non-negative number (or provide dailyRate/hourlyRate for LABOR)",
+      });
       return;
     }
 
-    // ⬅️ KUNCI: admin → GLOBAL, user → userScope
-    const targetScope = role === "ADMIN" ? "GLOBAL" : userScope;
+    let targetScope: string;
+    if (role === "ADMIN") {
+      const existsAnywhere = await existsMasterItemAnywhere(finalCode);
+      targetScope = existsAnywhere ? userScope : "GLOBAL";
+    } else {
+      targetScope = userScope;
+    }
+
+    const dupInTarget = await prisma.masterItem.findUnique({
+      where: { scope_code_unique: { scope: targetScope, code: finalCode } },
+      select: { id: true },
+    });
+    if (dupInTarget) {
+      res.status(409).json({
+        status: "error",
+        error: `Duplicate code in target scope (${targetScope}).`,
+      });
+      return;
+    }
 
     const data: any = {
       scope: targetScope,
@@ -285,28 +300,25 @@ export const createMasterItem = async (req: Request, res: Response) => {
       data.dailyRate = toFloat(dailyRate, null as any);
 
     const created = await prisma.masterItem.create({ data });
+
     res.status(201).json({
       status: "success",
       data: created,
-      _debug: { role, targetScope }, // ⬅️ supaya kamu bisa lihat peran & scope saat create
+      _debug: { role, targetScope },
     });
   } catch (e: any) {
     if (e?.code === "P2002") {
-      res
-        .status(409)
-        .json({
-          status: "error",
-          error: "Duplicate code. 'code' must be unique in your scope.",
-        });
+      res.status(409).json({
+        status: "error",
+        error: "Duplicate code. 'code' must be unique in the target scope.",
+      });
       return;
     }
-    res
-      .status(500)
-      .json({
-        status: "error",
-        error: "Failed to create master item",
-        detail: e?.message,
-      });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to create master item",
+      detail: e?.message,
+    });
   }
 };
 
@@ -599,21 +611,35 @@ export const updateMasterItemByCode = async (req: Request, res: Response) => {
         where: { scope_code_unique: { scope: "GLOBAL", code } },
       });
       if (!g || g.isDeleted) {
-        res.status(404).json({ status: "error", error: "Global item not found" });
+        res
+          .status(404)
+          .json({ status: "error", error: "Global item not found" });
         return;
       }
 
       const payload: any = {};
-      if (req.body.name !== undefined) payload.name = String(req.body.name).trim();
-      if (req.body.unit !== undefined) payload.unit = String(req.body.unit).trim();
+      if (req.body.name !== undefined)
+        payload.name = String(req.body.name).trim();
+      if (req.body.unit !== undefined)
+        payload.unit = String(req.body.unit).trim();
       if (req.body.price !== undefined) payload.price = Number(req.body.price);
-      if (req.body.notes !== undefined) payload.notes = req.body.notes ? String(req.body.notes) : null;
-      if (req.body.hourlyRate !== undefined) payload.hourlyRate = Number(req.body.hourlyRate);
-      if (req.body.dailyRate !== undefined) payload.dailyRate = Number(req.body.dailyRate);
+      if (req.body.notes !== undefined)
+        payload.notes = req.body.notes ? String(req.body.notes) : null;
+      if (req.body.hourlyRate !== undefined)
+        payload.hourlyRate = Number(req.body.hourlyRate);
+      if (req.body.dailyRate !== undefined)
+        payload.dailyRate = Number(req.body.dailyRate);
       if (req.body.type !== undefined) payload.type = String(req.body.type);
 
-      const updated = await prisma.masterItem.update({ where: { id: g.id }, data: payload });
-      res.status(200).json({ status: "success", data: updated, _debug: { role, scope: "GLOBAL" } });
+      const updated = await prisma.masterItem.update({
+        where: { id: g.id },
+        data: payload,
+      });
+      res.status(200).json({
+        status: "success",
+        data: updated,
+        _debug: { role, scope: "GLOBAL" },
+      });
       return;
     }
 
@@ -648,27 +674,44 @@ export const updateMasterItemByCode = async (req: Request, res: Response) => {
     }
 
     const payload: any = {};
-    if (req.body.name !== undefined) payload.name = String(req.body.name).trim();
-    if (req.body.unit !== undefined) payload.unit = String(req.body.unit).trim();
+    if (req.body.name !== undefined)
+      payload.name = String(req.body.name).trim();
+    if (req.body.unit !== undefined)
+      payload.unit = String(req.body.unit).trim();
     if (req.body.price !== undefined) payload.price = Number(req.body.price);
-    if (req.body.notes !== undefined) payload.notes = req.body.notes ? String(req.body.notes) : null;
-    if (req.body.hourlyRate !== undefined) payload.hourlyRate = Number(req.body.hourlyRate);
-    if (req.body.dailyRate !== undefined) payload.dailyRate = Number(req.body.dailyRate);
+    if (req.body.notes !== undefined)
+      payload.notes = req.body.notes ? String(req.body.notes) : null;
+    if (req.body.hourlyRate !== undefined)
+      payload.hourlyRate = Number(req.body.hourlyRate);
+    if (req.body.dailyRate !== undefined)
+      payload.dailyRate = Number(req.body.dailyRate);
     if (req.body.type !== undefined) payload.type = String(req.body.type);
     payload.isDeleted = false;
     payload.isDisabled = false;
 
-    const updated = await prisma.masterItem.update({ where: { id: userItem.id }, data: payload });
-    res.status(200).json({ status: "success", data: updated, _debug: { role, scope: userScope } });
+    const updated = await prisma.masterItem.update({
+      where: { id: userItem.id },
+      data: payload,
+    });
+    res.status(200).json({
+      status: "success",
+      data: updated,
+      _debug: { role, scope: userScope },
+    });
   } catch (e: any) {
     if (e?.code === "P2002") {
-      res.status(409).json({ status: "error", error: "Duplicate code in your scope" });
+      res
+        .status(409)
+        .json({ status: "error", error: "Duplicate code in your scope" });
       return;
     }
-    res.status(500).json({ status: "error", error: "Failed to update by code", detail: e?.message });
+    res.status(500).json({
+      status: "error",
+      error: "Failed to update by code",
+      detail: e?.message,
+    });
   }
 };
-
 
 export const deleteMasterItemByCode = async (req: Request, res: Response) => {
   try {
