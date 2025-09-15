@@ -42,6 +42,7 @@ import {
   updateAhspComponent,
   updateAhspOverheadByKode,
 } from "../controllers/ahspRecipe.controller";
+import { importMasterLabor, importMasterMaterials } from "../controllers/masterImport.controller";
 
 const router = express.Router();
 
@@ -50,7 +51,8 @@ router.use(express.urlencoded({ extended: true }));
 
 /** Import */
 router.post("/import", authenticate, uploadExcelCsv.single("file"), importHSP);
-
+router.post("/master/import/materials", authenticate, uploadExcelCsv.single("file"), importMasterMaterials);
+router.post("/master/import/labor", authenticate, uploadExcelCsv.single("file"), importMasterLabor);
 /** Kategori & Items HSP */
 router.get("/categories", authenticate, listCategories);
 router.get("/categories/:id", authenticate, getCategoryWithItems);
