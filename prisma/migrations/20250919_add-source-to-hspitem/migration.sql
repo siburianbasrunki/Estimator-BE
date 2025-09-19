@@ -1,0 +1,2 @@
+-- Baseline only (already applied in the database):
+-- ALTER TABLE "hsp_items" ADD COLUMN "source" TEXT;
