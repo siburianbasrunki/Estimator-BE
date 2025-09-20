@@ -3,6 +3,7 @@ import { Request, Response } from "express";
 import prisma from "../lib/prisma";
 import { scopeOf, mergeUserOverGlobal } from "../lib/_scoping";
 import { normalizeRole } from "../lib/authz";
+import { getActiveSourceCodes } from "./source.controller";
 
 /* Helpers */
 const toInt = (v: any, def = 0) => {
@@ -1134,7 +1135,11 @@ export const createHspItem = async (req: Request, res: Response) => {
     const deskripsiTrim = String(deskripsi).trim();
     const satuanTrim = String(satuan || "").trim();
     const s = String(sourceRaw || "").trim();
-    const sourceTag = s === "UUD" || s === "Sendiri" ? s : null;
+    let sourceTag: string | null = null;
+    if (s) {
+      const allowed = await getActiveSourceCodes();
+      if (allowed.has(s.toLowerCase())) sourceTag = s;
+    }
     if (role === "ADMIN") {
       // Cek HANYA di GLOBAL untuk item
       const existsGlobal = await prisma.hSPItem.findUnique({
@@ -1310,8 +1315,10 @@ export const updateHspItem = async (req: Request, res: Response) => {
       payload.satuan = req.body.satuan.trim();
     if (typeof req.body?.source === "string") {
       const s = req.body.source.trim();
-      payload.source = s === "UUD" || s === "Sendiri" ? s : null;
+      const allowed = await getActiveSourceCodes();
+      (payload as any).source = allowed.has(s.toLowerCase()) ? s : null;
     }
+
     const current = await prisma.hSPItem.findUnique({
       where: { id },
       include: { category: { select: { id: true, name: true, scope: true } } },
@@ -1472,8 +1479,10 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
 
     if (typeof req.body?.source === "string") {
       const s = req.body.source.trim();
-      payload.source = s === "UUD" || s === "Sendiri" ? s : null;
+      const allowed = await getActiveSourceCodes();
+      (payload as any).source = allowed.has(s.toLowerCase()) ? s : null;
     }
+
     let userItem = await prisma.hSPItem
       .findUnique({ where: { scope_kode_unique: { scope: userScope, kode } } })
       .catch(() => null);
