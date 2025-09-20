@@ -43,6 +43,7 @@ import {
   updateAhspOverheadByKode,
 } from "../controllers/ahspRecipe.controller";
 import { importMasterLabor, importMasterMaterials } from "../controllers/masterImport.controller";
+import { createSource, deleteSource, listSources, updateSource } from "../controllers/source.controller";
 
 const router = express.Router();
 
@@ -120,5 +121,9 @@ router.patch("/master/by-code/:code/override/active", authenticate, setMasterOve
 router.post("/categories", authenticate, createHspCategory);
 router.patch("/categories/:id", authenticate, updateHspCategory);
 router.delete("/categories/:id", authenticate, deleteHspCategory);
-
+// source flag
+router.get("/sources", authenticate, listSources);
+router.post("/sources", authenticate, createSource);
+router.patch("/sources/:id", authenticate, updateSource);
+router.delete("/sources/:id", authenticate, deleteSource);
 export default router;

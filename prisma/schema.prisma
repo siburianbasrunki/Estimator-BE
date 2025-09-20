@@ -176,6 +176,16 @@ enum MasterItemType {
   OTHER
 }
 
+model SourceTag {
+  id        String   @id @default(uuid())
+  code      String   @unique               
+  label     String                         
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("source_tags")
+}
 model MasterItem {
   id    String         @id @default(uuid())
   scope String         @default("GLOBAL")
