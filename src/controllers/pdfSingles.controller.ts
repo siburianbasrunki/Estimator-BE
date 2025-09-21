@@ -15,7 +15,6 @@ export interface AuthenticatedRequest extends Request {
   userId?: string;
 }
 
-
 function toBase64DataUrl(arrbuf: ArrayBuffer, ext: "png" | "jpeg") {
   const b64 = Buffer.from(arrbuf).toString("base64");
   return `data:image/${ext};base64,${b64}`;
@@ -23,7 +22,11 @@ function toBase64DataUrl(arrbuf: ArrayBuffer, ext: "png" | "jpeg") {
 function isSupportedImageContentType(ct?: string) {
   if (!ct) return false;
   const s = ct.toLowerCase();
-  return s.includes("image/png") || s.includes("image/jpeg") || s.includes("image/jpg");
+  return (
+    s.includes("image/png") ||
+    s.includes("image/jpeg") ||
+    s.includes("image/jpg")
+  );
 }
 
 async function resolveLogoDataUrl(
@@ -41,7 +44,9 @@ async function resolveLogoDataUrl(
         format: "png",
       });
       const fetchUrl = forcePngDelivery(up.imageUrl); // pastikan PNG delivery
-      const resp = await axios.get<ArrayBuffer>(fetchUrl, { responseType: "arraybuffer" });
+      const resp = await axios.get<ArrayBuffer>(fetchUrl, {
+        responseType: "arraybuffer",
+      });
 
       const ct = resp.headers?.["content-type"];
       if (!isSupportedImageContentType(ct)) return undefined;
@@ -54,7 +59,9 @@ async function resolveLogoDataUrl(
     } else if (estimationImageUrl) {
       // estimationImageUrl mungkin WEBP → paksa Cloudinary output PNG
       const fetchUrl = forcePngDelivery(estimationImageUrl);
-      const resp = await axios.get<ArrayBuffer>(fetchUrl, { responseType: "arraybuffer" });
+      const resp = await axios.get<ArrayBuffer>(fetchUrl, {
+        responseType: "arraybuffer",
+      });
 
       const ct = resp.headers?.["content-type"];
       if (!isSupportedImageContentType(ct)) {
@@ -71,7 +78,9 @@ async function resolveLogoDataUrl(
     return undefined;
   } finally {
     if (tempPublicId) {
-      try { await deleteFromCloudinary(tempPublicId); } catch {}
+      try {
+        await deleteFromCloudinary(tempPublicId);
+      } catch {}
     }
   }
 }
@@ -120,15 +129,88 @@ export const downloadVolumePdf = async (
     if (!est)
       return void res.status(404).json({ error: "Estimation not found" });
 
+    // 1) Kumpulkan semua nama extras unik (urut stabil)
+    const extrasOrder: string[] = [];
+    const seen = new Set<string>();
+    for (const sec of est.items) {
+      for (const d of sec.details) {
+        for (const v of d.volumeDetails || []) {
+          const arr = Array.isArray(v.extras) ? (v.extras as any[]) : [];
+          for (const e of arr) {
+            const name = (e?.name ?? "").toString().trim();
+            if (name && !seen.has(name)) {
+              seen.add(name);
+              extrasOrder.push(name);
+            }
+          }
+        }
+      }
+    }
+
+    // 2) Siapkan header & widths dinamis
+    const baseHeaders = [
+      "Nama Volume",
+      "Jenis",
+      "P",
+      "L",
+      "T",
+      "Jumlah",
+      "Volume",
+      "Signed Vol",
+      "Satuan",
+    ];
+    const baseWidths = [120, 40, 35, 35, 35, 45, 55, 60, 45];
+
+    const extraHeaders = extrasOrder.map((n) => `Extra: ${n}`);
+    const extraWidths = extrasOrder.map(() => 70); // lebar moderat
+
+    const headers = [...baseHeaders, ...extraHeaders];
+    const widths = [...baseWidths, ...extraWidths];
+
+    // 3) Helper render extras per baris
+    function renderExtras(values: any[] | undefined) {
+      const arr = Array.isArray(values) ? values : [];
+      const map = new Map<string, any>();
+      for (const e of arr) {
+        const name = (e?.name ?? "").toString().trim();
+        if (name) map.set(name, e?.value);
+      }
+      return extrasOrder.map((nm) => {
+        const v = map.get(nm);
+        const n = Number(v);
+        return Number.isFinite(n) ? n : (v ?? "");
+      });
+    }
+
+    // 4) Build rows (termasuk fallback bila tak ada detail)
     const rows: Array<string | number>[] = [];
     for (const sec of est.items) {
       for (const d of sec.details) {
         const sat = d.satuan || d.hspItem?.satuan || "-";
-        for (const v of d.volumeDetails || []) {
+        const vols = d.volumeDetails || [];
+
+        if (vols.length === 0) {
+          const vol = Number(d.volume || 0);
+          rows.push([
+            "–", // Nama Volume
+            "+", // Jenis
+            0,
+            0,
+            0,
+            0, // P, L, T, Jumlah
+            vol, // Volume
+            vol, // Signed Vol
+            sat, // Satuan
+            ...extrasOrder.map(() => ""), // kosongkan extras
+          ]);
+          continue;
+        }
+
+        for (const v of vols) {
           const sign = v.jenis === "SUB" ? -1 : 1;
           rows.push([
             v.nama || "-",
-            v.jenis || "-",
+            v.jenis === "SUB" ? "-" : "+",
             Number(v.panjang || 0),
             Number(v.lebar || 0),
             Number(v.tinggi || 0),
@@ -136,6 +218,7 @@ export const downloadVolumePdf = async (
             Number(v.volume || 0),
             sign * Number(v.volume || 0),
             sat,
+            ...renderExtras(v.extras as any[]),
           ]);
         }
       }
@@ -145,23 +228,13 @@ export const downloadVolumePdf = async (
     const pdf = await buildTablePdf({
       title: "Volume Detail",
       subtitle: `${est.projectName} • ${est.projectOwner}`,
-      columns: {
-        headers: [
-          "Nama Volume",
-          "Jenis",
-          "P",
-          "L",
-          "T",
-          "Jumlah",
-          "Volume",
-          "Signed Vol",
-          "Satuan",
-        ],
-        widths: [120, 40, 35, 35, 35, 45, 55, 60, 45],
-      },
+      columns: { headers, widths },
       rows,
       logo,
       landscape: true,
+      fitToPage: true, // auto-scale bila lebar melebihi halaman
+      condense: true, // font & padding sedikit dipadatkan
+      pageSize: "A4", // naik ke A3 otomatis jika fitToPage perlu
     });
 
     const fileName = `Volume_${sanitizeFileName(est.projectName)}.pdf`;
@@ -250,8 +323,8 @@ export const downloadKategoriPdf = async (
     for (const section of est.items) {
       for (const d of section.details) {
         const catName =
-          d.hspItem?.category?.name?.trim() ||
           section.title?.trim() ||
+          d.hspItem?.category?.name?.trim() ||
           "Lainnya";
         const jumlah =
           (typeof d.hargaTotal === "number" ? d.hargaTotal : undefined) ??
