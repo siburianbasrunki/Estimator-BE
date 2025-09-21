@@ -248,7 +248,7 @@ function addSheetKategoriDipakai(
   for (const section of est.items) {
     for (const d of section.details) {
       const catName =
-        d.hspItem?.category?.name?.trim() || section.title?.trim() || "Lainnya";
+        section.title?.trim() || d.hspItem?.category?.name?.trim() || "Lainnya";
       const jumlah =
         (typeof d.hargaTotal === "number" ? d.hargaTotal : undefined) ??
         Number(d.volume || 0) * Number(d.hargaSatuan || 0);
@@ -358,11 +358,27 @@ function addSheetJobItemDipakai(
   return ws;
 }
 
-/** Volume (tabel detail): Item Pekerjaan + kolom P, L, T, dst. */
 function addSheetVolumeDetailed(
   wb: ExcelJS.Workbook,
   est: EstimationWithRelations
 ) {
+  const extrasOrder: string[] = [];
+  const extrasSeen = new Set<string>();
+  for (const sec of est.items) {
+    for (const d of sec.details) {
+      for (const v of d.volumeDetails || []) {
+        const arr = Array.isArray(v.extras) ? (v.extras as any[]) : [];
+        for (const e of arr) {
+          const name = (e?.name ?? "").toString().trim();
+          if (name && !extrasSeen.has(name)) {
+            extrasSeen.add(name);
+            extrasOrder.push(name);
+          }
+        }
+      }
+    }
+  }
+
   const ws = wb.addWorksheet("Rekapitulasi Volume", {
     views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: {
@@ -374,7 +390,8 @@ function addSheetVolumeDetailed(
     properties: { defaultRowHeight: 18 },
   });
 
-  ws.columns = [
+  // 2) Definisikan kolom dasar
+  const baseCols: Partial<ExcelJS.Column>[] = [
     { header: "Item Pekerjaan", key: "item", width: 56 },
     { header: "Nama Volume", key: "nama", width: 30 },
     { header: "Jenis (+/-)", key: "jenis", width: 12 },
@@ -387,9 +404,18 @@ function addSheetVolumeDetailed(
     { header: "Satuan", key: "sat", width: 10 },
   ];
 
+  // 3) Tambahkan kolom extras dinamis (mis. "Extra: Diameter")
+  const extraCols: Partial<ExcelJS.Column>[] = extrasOrder.map((nm, i) => ({
+    header: `Extra: ${nm}`,
+    key: `extra_${i}`,
+    width: 16,
+  }));
+
+  ws.columns = [...baseCols, ...extraCols];
+
   addTitleBarAuto(ws, "Volume Detail");
 
-  // Header
+  // Header (row 2)
   const header = ws.getRow(2);
   header.values = ws.columns.map((c) => (c.header ?? "") as string);
   header.eachCell((c) => {
@@ -403,14 +429,48 @@ function addSheetVolumeDetailed(
     c.border = BORDER_THIN as any;
   });
 
-  // Data
   const rows: (string | number)[][] = [];
+
+  // Helper untuk render nilai extras sesuai urutan extrasOrder
+  function renderExtras(values: any[] | undefined) {
+    const arr = Array.isArray(values) ? values : [];
+    const map = new Map<string, any>();
+    for (const e of arr) {
+      const name = (e?.name ?? "").toString().trim();
+      if (name) map.set(name, e?.value);
+    }
+    return extrasOrder.map((nm) => {
+      const v = map.get(nm);
+      const n = Number(v);
+      return Number.isFinite(n) ? n : (v ?? ""); // angka -> number, lainnya biarkan teks
+    });
+  }
+
   for (const sec of est.items) {
     for (const d of sec.details) {
       const job = d.deskripsi || d.hspItem?.deskripsi || "-";
       const sat = d.satuan || d.hspItem?.satuan || "-";
       const vols = d.volumeDetails || [];
-      if (!vols.length) continue;
+
+      if (vols.length === 0) {
+        // Fallback baris untuk item tanpa detail → pakai volume dari ItemDetail
+        const vol = Number(d.volume || 0);
+        rows.push([
+          job, // Item Pekerjaan
+          "–", // Nama Volume
+          "+", // Jenis (+/-)
+          0, // P
+          0, // L
+          0, // T
+          0, // Jumlah
+          vol, // Volume
+          vol, // Signed Vol
+          sat, // Satuan
+          // extras kosong
+          ...extrasOrder.map(() => ""),
+        ]);
+        continue;
+      }
 
       for (const v of vols) {
         const sign = v.jenis === "SUB" ? -1 : 1;
@@ -425,6 +485,7 @@ function addSheetVolumeDetailed(
           Number(v.volume || 0), // Volume
           sign * Number(v.volume || 0), // Signed Vol
           sat, // Satuan
+          ...renderExtras(v.extras as any[]),
         ]);
       }
     }
@@ -434,13 +495,17 @@ function addSheetVolumeDetailed(
 
   // Styling baris data
   const dataStart = 3;
-  for (let r = dataStart; r < dataStart + rows.length; r++) {
+  const dataEnd = dataStart + rows.length - 1;
+  // Indeks kolom numerik dasar (P..SignedVol) = 4..9
+  const numericIdxs = new Set<number>([4, 5, 6, 7, 8, 9]);
+  // Kalau extras berisi angka, biarin default (teks/angka mixed), tidak dipaksa kanan.
+
+  for (let r = dataStart; r <= dataEnd; r++) {
     const row = ws.getRow(r);
     row.eachCell((c, ci) => {
       c.border = BORDER_THIN as any;
-      if ([4, 5, 6, 7, 8, 9].includes(ci))
-        c.alignment = { horizontal: "right" }; // numeric
-      if ([1, 2].includes(ci))
+      if (numericIdxs.has(ci)) c.alignment = { horizontal: "right" };
+      if (ci === 1 || ci === 2)
         c.alignment = { vertical: "top", wrapText: true };
     });
     if ((r - dataStart) % 2 === 1) {

@@ -497,12 +497,33 @@ export async function buildEstimationPdf(
       { text: "Breakdown Volume Dipakai", style: "th" },
     ],
   ];
+
+  function extrasInline(e: any[] | undefined) {
+    const arr = Array.isArray(e) ? e : [];
+    const pairs = arr
+      .map((x) => {
+        const k = (x?.name ?? "").toString().trim();
+        const v = x?.value;
+        if (!k) return null;
+        return `${k}=${v}`;
+      })
+      .filter(Boolean);
+    return pairs.length ? ` (${pairs.join(", ")})` : "";
+  }
+
   for (const sec of est.items) {
     for (const d of sec.details || []) {
       const vols = d.volumeDetails || [];
-      if (!vols.length) continue;
       const job = d.deskripsi || d.hspItem?.deskripsi || "-";
       const sat = d.satuan || d.hspItem?.satuan || "-";
+
+      if (vols.length === 0) {
+        const V = N(d.volume);
+        const line = `+ tanpa breakdown = ${V} ${sat}`;
+        volumeRows.push([{ text: job }, { text: line }]);
+        continue;
+      }
+
       const lines = vols.map((v) => {
         const sign = v.jenis === "SUB" ? "-" : "+";
         const P = N(v.panjang),
@@ -511,7 +532,8 @@ export async function buildEstimationPdf(
           J = N(v.jumlah),
           V = N(v.volume);
         const nm = v.nama || "-";
-        return `${sign} ${nm}: ${P}×${L}×${T}×${J} = ${V} ${sat}`;
+        const ex = extrasInline(v.extras as any[]);
+        return `${sign} ${nm}: ${P}×${L}×${T}×${J} = ${V} ${sat}${ex}`;
       });
       volumeRows.push([{ text: job }, { text: lines.join("\n") }]);
     }
