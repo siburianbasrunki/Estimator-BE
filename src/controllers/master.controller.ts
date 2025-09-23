@@ -249,20 +249,33 @@ export const createMasterItem = async (req: Request, res: Response) => {
       if (!isStr(finalCode)) finalCode = autoCode(type);
     }
 
-    let priceNum = toFloat(price, NaN);
-    const hr = hourlyRate !== undefined ? toFloat(hourlyRate, NaN) : NaN;
-    const dr = dailyRate !== undefined ? toFloat(dailyRate, NaN) : NaN;
+    // Opsi A: untuk LABOR, abaikan 'price' dari klien; wajib derive dari dailyRate/hourlyRate
+    let derivedPrice: number | undefined;
     if (type === "LABOR") {
-      if (Number.isFinite(dr)) priceNum = dr;
-      else if (Number.isFinite(hr)) priceNum = hr;
-    }
-    if (!Number.isFinite(priceNum) || priceNum < 0) {
-      res.status(400).json({
-        status: "error",
-        error:
-          "price must be a non-negative number (or provide dailyRate/hourlyRate for LABOR)",
-      });
-      return;
+      const dr = dailyRate !== undefined ? toFloat(dailyRate, NaN) : NaN;
+      const hr = hourlyRate !== undefined ? toFloat(hourlyRate, NaN) : NaN;
+
+      if (Number.isFinite(dr) && dr >= 0) derivedPrice = dr;
+      else if (Number.isFinite(hr) && hr >= 0) derivedPrice = hr;
+      else {
+        res.status(400).json({
+          status: "error",
+          error:
+            "LABOR requires dailyRate or hourlyRate (price is derived and ignored).",
+        });
+        return;
+      }
+    } else {
+      // Non-LABOR: pakai price biasa
+      const p = toFloat(price, NaN);
+      if (!Number.isFinite(p) || p < 0) {
+        res.status(400).json({
+          status: "error",
+          error: "price must be a non-negative number",
+        });
+        return;
+      }
+      derivedPrice = p;
     }
 
     let targetScope: string;
@@ -290,7 +303,7 @@ export const createMasterItem = async (req: Request, res: Response) => {
       code: norm(finalCode),
       name: norm(name),
       unit: norm(unit),
-      price: priceNum,
+      price: derivedPrice!,
       type,
       notes: isStr(notes) ? norm(notes) : null,
     };
@@ -383,17 +396,6 @@ export const updateMasterItem = async (req: Request, res: Response) => {
       }
       payload.unit = norm(req.body.unit);
     }
-    if (req.body.price !== undefined) {
-      const n = toFloat(req.body.price, NaN);
-      if (!Number.isFinite(n) || n < 0) {
-        res.status(400).json({
-          status: "error",
-          error: "price must be a non-negative number",
-        });
-        return;
-      }
-      payload.price = n;
-    }
     if (req.body.type !== undefined) {
       if (!isValidType(req.body.type)) {
         res.status(400).json({
@@ -404,29 +406,51 @@ export const updateMasterItem = async (req: Request, res: Response) => {
       }
       payload.type = req.body.type;
     }
-    if (req.body.hourlyRate !== undefined)
-      payload.hourlyRate = toFloat(req.body.hourlyRate, null as any);
-    if (req.body.dailyRate !== undefined)
-      payload.dailyRate = toFloat(req.body.dailyRate, null as any);
+
+    const rawDR = req.body.dailyRate;
+    const rawHR = req.body.hourlyRate;
+    if (rawDR !== undefined) payload.dailyRate = toFloat(rawDR, null as any);
+    if (rawHR !== undefined) payload.hourlyRate = toFloat(rawHR, null as any);
+
     if (req.body.notes !== undefined)
       payload.notes = isStr(req.body.notes) ? norm(req.body.notes) : null;
 
-    if (
-      original.type === "LABOR" &&
-      req.body.dailyRate !== undefined &&
-      req.body.price === undefined
-    ) {
-      const dr = toFloat(req.body.dailyRate, NaN);
-      if (Number.isFinite(dr) && dr >= 0) payload.price = dr;
-    }
-    if (
-      original.type === "LABOR" &&
-      req.body.dailyRate === undefined &&
-      req.body.hourlyRate !== undefined &&
-      req.body.price === undefined
-    ) {
-      const hr = toFloat(req.body.hourlyRate, NaN);
-      if (Number.isFinite(hr) && hr >= 0) payload.price = hr;
+    const willBeLabor = (payload.type ?? original.type) === "LABOR";
+
+    if (willBeLabor) {
+      delete payload.price;
+
+      const dr =
+        rawDR !== undefined ? toFloat(rawDR, NaN) : (original.dailyRate ?? NaN);
+      const hr =
+        rawHR !== undefined
+          ? toFloat(rawHR, NaN)
+          : (original.hourlyRate ?? NaN);
+
+      if (Number.isFinite(dr) && dr >= 0) {
+        payload.price = dr;
+      } else if (Number.isFinite(hr) && hr >= 0) {
+        payload.price = hr;
+      } else {
+        res.status(400).json({
+          status: "error",
+          error:
+            "LABOR requires dailyRate or hourlyRate to compute price (price field is ignored).",
+        });
+        return;
+      }
+    } else {
+      if (req.body.price !== undefined) {
+        const n = toFloat(req.body.price, NaN);
+        if (!Number.isFinite(n) || n < 0) {
+          res.status(400).json({
+            status: "error",
+            error: "price must be a non-negative number",
+          });
+          return;
+        }
+        payload.price = n;
+      }
     }
 
     const updated = await prisma.masterItem.update({
@@ -622,28 +646,73 @@ export const updateMasterItemByCode = async (req: Request, res: Response) => {
         payload.name = String(req.body.name).trim();
       if (req.body.unit !== undefined)
         payload.unit = String(req.body.unit).trim();
-      if (req.body.price !== undefined) payload.price = Number(req.body.price);
       if (req.body.notes !== undefined)
         payload.notes = req.body.notes ? String(req.body.notes) : null;
-      if (req.body.hourlyRate !== undefined)
-        payload.hourlyRate = Number(req.body.hourlyRate);
-      if (req.body.dailyRate !== undefined)
-        payload.dailyRate = Number(req.body.dailyRate);
-      if (req.body.type !== undefined) payload.type = String(req.body.type);
 
+      if (req.body.type !== undefined) {
+        if (!isValidType(req.body.type)) {
+          res.status(400).json({
+            status: "error",
+            error: "type must be LABOR|MATERIAL|EQUIPMENT|OTHER",
+          });
+          return;
+        }
+        payload.type = req.body.type;
+      }
+
+      const rawDR = req.body.dailyRate;
+      const rawHR = req.body.hourlyRate;
+      if (rawDR !== undefined) payload.dailyRate = toFloat(rawDR, null as any);
+      if (rawHR !== undefined) payload.hourlyRate = toFloat(rawHR, null as any);
+
+      const willBeLabor = (payload.type ?? g.type) === "LABOR";
+      if (willBeLabor) {
+        delete payload.price;
+        const dr =
+          rawDR !== undefined ? toFloat(rawDR, NaN) : (g.dailyRate ?? NaN);
+        const hr =
+          rawHR !== undefined ? toFloat(rawHR, NaN) : (g.hourlyRate ?? NaN);
+        if (Number.isFinite(dr) && dr >= 0) payload.price = dr;
+        else if (Number.isFinite(hr) && hr >= 0) payload.price = hr;
+        else {
+          res.status(400).json({
+            status: "error",
+            error:
+              "LABOR requires dailyRate or hourlyRate to compute price (price field is ignored).",
+          });
+          return;
+        }
+      } else {
+        if (req.body.price !== undefined) {
+          const n = toFloat(req.body.price, NaN);
+          if (!Number.isFinite(n) || n < 0) {
+            res.status(400).json({
+              status: "error",
+              error: "price must be a non-negative number",
+            });
+            return;
+          }
+          payload.price = n;
+        }
+      }
+
+      // Update, lalu recompute semua AHSP yang refer ke master item ini
       const updated = await prisma.masterItem.update({
         where: { id: g.id },
         data: payload,
       });
+
+      await recomputeRecipesUsingMasterItem(updated.id);
+
       res.status(200).json({
         status: "success",
         data: updated,
-        _debug: { role, scope: "GLOBAL" },
+        meta: { scope: "GLOBAL", recomputed: true },
       });
       return;
     }
 
-    // USER → copy-on-write (override)
+    // ===================== USER: copy-on-write override =====================
     let userItem = await prisma.masterItem
       .findUnique({ where: { scope_code_unique: { scope: userScope, code } } })
       .catch(() => null);
@@ -678,25 +747,73 @@ export const updateMasterItemByCode = async (req: Request, res: Response) => {
       payload.name = String(req.body.name).trim();
     if (req.body.unit !== undefined)
       payload.unit = String(req.body.unit).trim();
-    if (req.body.price !== undefined) payload.price = Number(req.body.price);
     if (req.body.notes !== undefined)
       payload.notes = req.body.notes ? String(req.body.notes) : null;
-    if (req.body.hourlyRate !== undefined)
-      payload.hourlyRate = Number(req.body.hourlyRate);
-    if (req.body.dailyRate !== undefined)
-      payload.dailyRate = Number(req.body.dailyRate);
-    if (req.body.type !== undefined) payload.type = String(req.body.type);
+
+    if (req.body.type !== undefined) {
+      if (!isValidType(req.body.type)) {
+        res.status(400).json({
+          status: "error",
+          error: "type must be LABOR|MATERIAL|EQUIPMENT|OTHER",
+        });
+        return;
+      }
+      payload.type = req.body.type;
+    }
+
+    const rawDR = req.body.dailyRate;
+    const rawHR = req.body.hourlyRate;
+    if (rawDR !== undefined) payload.dailyRate = toFloat(rawDR, null as any);
+    if (rawHR !== undefined) payload.hourlyRate = toFloat(rawHR, null as any);
+
+    const willBeLabor = (payload.type ?? userItem.type) === "LABOR";
+    if (willBeLabor) {
+      delete payload.price;
+      const dr =
+        rawDR !== undefined ? toFloat(rawDR, NaN) : (userItem.dailyRate ?? NaN);
+      const hr =
+        rawHR !== undefined
+          ? toFloat(rawHR, NaN)
+          : (userItem.hourlyRate ?? NaN);
+      if (Number.isFinite(dr) && dr >= 0) payload.price = dr;
+      else if (Number.isFinite(hr) && hr >= 0) payload.price = hr;
+      else {
+        res.status(400).json({
+          status: "error",
+          error:
+            "LABOR requires dailyRate or hourlyRate to compute price (price field is ignored).",
+        });
+        return;
+      }
+    } else {
+      if (req.body.price !== undefined) {
+        const n = toFloat(req.body.price, NaN);
+        if (!Number.isFinite(n) || n < 0) {
+          res.status(400).json({
+            status: "error",
+            error: "price must be a non-negative number",
+          });
+          return;
+        }
+        payload.price = n;
+      }
+    }
+
     payload.isDeleted = false;
     payload.isDisabled = false;
 
+    // Update, lalu recompute semua AHSP yang refer ke master item override ini
     const updated = await prisma.masterItem.update({
       where: { id: userItem.id },
       data: payload,
     });
+
+    await recomputeRecipesUsingMasterItem(updated.id);
+
     res.status(200).json({
       status: "success",
       data: updated,
-      _debug: { role, scope: userScope },
+      meta: { scope: userScope, recomputed: true },
     });
   } catch (e: any) {
     if (e?.code === "P2002") {
