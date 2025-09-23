@@ -188,23 +188,32 @@ export const listCategories = async (req: Request, res: Response) => {
     const [rowsUser, rowsGlobal] = await Promise.all([
       prisma.hSPCategory.findMany({
         where: { ...whereBase, scope: userScope },
-        orderBy: { name: "asc" },
+        orderBy: { createdAt: "asc" },
         include: { _count: { select: { items: true } } },
       }),
       prisma.hSPCategory.findMany({
         where: { ...whereBase, scope: "GLOBAL" },
-        orderBy: { name: "asc" },
+        orderBy: { createdAt: "asc" },
         include: { _count: { select: { items: true } } },
       }),
     ]);
 
     const merged = mergeUserOverGlobal(rowsUser, rowsGlobal, (r) => r.name);
+
+    merged.sort((a, b) => {
+      const ta = new Date(a.createdAt).getTime();
+      const tb = new Date(b.createdAt).getTime();
+      return ta - tb; 
+    });
+
     const total = merged.length;
     const data = merged.slice(skip, skip + take);
 
-    res
-      .status(200)
-      .json({ status: "success", data, pagination: { skip, take, total } });
+    res.status(200).json({
+      status: "success",
+      data,
+      pagination: { skip, take, total },
+    });
   } catch (e: any) {
     res.status(500).json({
       status: "error",
