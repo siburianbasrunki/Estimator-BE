@@ -115,6 +115,7 @@ type SlimItem = {
   hspCategoryId: string;
   isDeleted: boolean;
   isDisabled: boolean;
+  source: string | null;
 };
 function chooseEffective(
   viewerRole: Role | undefined,
@@ -462,10 +463,10 @@ export const listAllGrouped = async (req: Request, res: Response) => {
     const itemOrderDir =
       (req.query.itemOrderDir as string) === "desc" ? "desc" : "asc";
 
+    // === Ambil kategori yang bisa dilihat (GLOBAL + scope user)
     const catWhere: any = {};
     if (q) catWhere.name = { contains: q, mode: "insensitive" as const };
 
-    // Ambil semua kategori di user-scope dan GLOBAL
     const [catsUser, catsGlobal] = await Promise.all([
       prisma.hSPCategory.findMany({
         where: { ...catWhere, scope: userScope },
@@ -477,103 +478,166 @@ export const listAllGrouped = async (req: Request, res: Response) => {
       }),
     ]);
 
-    // Buat index by name
+    if (catsUser.length === 0 && catsGlobal.length === 0) {
+      res.status(200).json({
+        status: "success",
+        data: {},
+        meta: {
+          categories: 0,
+          items: 0,
+          params: {
+            q,
+            limitPerCategory: takePerCat ?? "ALL",
+            includeEmpty,
+            itemOrderBy,
+            itemOrderDir,
+          },
+        },
+      });
+      return;
+    }
+
+    // Index kategori
     const byNameUser = new Map(catsUser.map((c) => [c.name, c]));
     const byNameGlobal = new Map(catsGlobal.map((c) => [c.name, c]));
-
-    // >>>>>>> Perubahan utamanya di sini: pakai UNION nama kategori
     const categoryNames = Array.from(
       new Set<string>([
         ...catsGlobal.map((c) => c.name),
         ...catsUser.map((c) => c.name),
       ])
     ).sort((a, b) => a.localeCompare(b));
-    // <<<<<<<
 
-    const result: Record<
-      string,
-      Array<{
-        kode: string;
-        deskripsi: string;
-        satuan: string;
-        harga: number;
-        source: string;
-        meta?: any;
-      }>
-    > = {};
+    const allCatIds = [
+      ...catsUser.map((c) => c.id),
+      ...catsGlobal.map((c) => c.id),
+    ];
+    const catIdToName = new Map<string, string>();
+    for (const c of [...catsUser, ...catsGlobal]) {
+      catIdToName.set(c.id, c.name);
+    }
+
+    // === Ambil SEMUA item dalam kategori yang boleh dilihat (sekali fetch), lalu dedupe per kode
+    const itemTextFilter = q
+      ? {
+          OR: [
+            { kode: { contains: q, mode: "insensitive" as const } },
+            { deskripsi: { contains: q, mode: "insensitive" as const } },
+          ],
+        }
+      : {};
+
+    const [rowsUser, rowsGlobal] = await Promise.all([
+      prisma.hSPItem.findMany({
+        where: {
+          scope: userScope,
+          hspCategoryId: { in: allCatIds },
+          isDeleted: false,
+          // default sembunyikan yang disabled; kalau mau expose, bisa tambah flag.
+          isDisabled: false,
+          ...itemTextFilter,
+        },
+        select: {
+          id: true,
+          scope: true,
+          kode: true,
+          deskripsi: true,
+          satuan: true,
+          harga: true,
+          isDeleted: true,
+          isDisabled: true,
+          hspCategoryId: true,
+          source: true,
+        },
+      }),
+      prisma.hSPItem.findMany({
+        where: {
+          scope: "GLOBAL",
+          hspCategoryId: { in: allCatIds },
+          isDeleted: false,
+          // GLOBAL tidak punya disabled semantik viewer, biarkan apa adanya
+          ...itemTextFilter,
+        },
+        select: {
+          id: true,
+          scope: true,
+          kode: true,
+          deskripsi: true,
+          satuan: true,
+          harga: true,
+          isDeleted: true,
+          isDisabled: true,
+          hspCategoryId: true,
+          source: true,
+        },
+      }),
+    ]);
+
+    // Dedupe per kode: pilih effective u/g SEKALI saja
+    const byKodeUser = new Map(rowsUser.map((r) => [r.kode, r]));
+    const byKodeGlobal = new Map(rowsGlobal.map((r) => [r.kode, r]));
+    const allKode = new Set<string>([
+      ...byKodeUser.keys(),
+      ...byKodeGlobal.keys(),
+    ]);
+
+    type OutItem = {
+      kode: string;
+      deskripsi: string;
+      satuan: string;
+      harga: number;
+      source: string | null;
+      meta: {
+        source: "USER" | "ADMIN";
+        hasUserOverride: boolean;
+        userActive: boolean;
+      };
+      hspCategoryId: string; // untuk bucketing
+    };
+
+    const effectiveByCatName: Record<string, OutItem[]> = {};
+    for (const name of categoryNames) effectiveByCatName[name] = [];
+
+    for (const kode of allKode) {
+      const u = byKodeUser.get(kode);
+      const g = byKodeGlobal.get(kode);
+      const { chosen, meta } = chooseEffective(viewerRole, u as any, g as any);
+
+      if (!chosen) continue; // tombstone case
+
+      const catName = catIdToName.get(chosen.hspCategoryId);
+      if (!catName) continue; // kategori di luar akses viewer
+
+      effectiveByCatName[catName].push({
+        kode: chosen.kode,
+        deskripsi: chosen.deskripsi,
+        satuan: chosen.satuan,
+        harga: chosen.harga,
+        source: chosen.source ?? null,
+        meta,
+        hspCategoryId: chosen.hspCategoryId,
+      });
+    }
+
+    // Sort & slice per kategori
+    const dir = itemOrderDir === "desc" ? -1 : 1;
+    const result: Record<string, Array<Omit<OutItem, "hspCategoryId">>> = {};
     let totalItems = 0;
 
-    const select = {
-      id: true,
-      scope: true,
-      kode: true,
-      deskripsi: true,
-      satuan: true,
-      harga: true,
-      isDeleted: true,
-      isDisabled: true,
-      hspCategoryId: true,
-      source: true,
-    } as const;
-
     for (const catName of categoryNames) {
-      const uCat = byNameUser.get(catName) || null;
-      const gCat = byNameGlobal.get(catName) || null;
+      let arr = effectiveByCatName[catName];
 
-      // Kalau tidak ada di dua-duanya (harusnya tidak mungkin) skip
-      if (!uCat && !gCat) continue;
-
-      const whereUser: any = { scope: userScope };
-      // GLOBAL: tetap hide yang terhapus
-      const whereGlobal: any = { isDeleted: false, scope: "GLOBAL" };
-
-      // Penting: user item bisa refer ke category GLOBAL (override lama),
-      // jadi kita cari di kedua id kategori (user & global) sekaligus untuk sisi USER.
-      const idsForUser = [uCat?.id, gCat?.id].filter(Boolean) as string[];
-      if (idsForUser.length) whereUser.hspCategoryId = { in: idsForUser };
-      whereGlobal.hspCategoryId = gCat?.id ?? "__NO_MATCH__";
-
-      const [iu, ig] = await Promise.all([
-        prisma.hSPItem.findMany({ where: whereUser, select }),
-        prisma.hSPItem.findMany({ where: whereGlobal, select }),
-      ]);
-
-      const mapU = new Map(iu.map((r) => [r.kode, r]));
-      const mapG = new Map(ig.map((r) => [r.kode, r]));
-      const allKode = new Set([...mapU.keys(), ...mapG.keys()]);
-
-      let merged = Array.from(allKode)
-        .map((kode) => {
-          const { chosen, meta } = chooseEffective(
-            viewerRole,
-            mapU.get(kode),
-            mapG.get(kode)
-          );
-          return chosen ? { ...chosen, meta } : null;
-        })
-        .filter(Boolean) as any[];
-
-      const dir = itemOrderDir === "desc" ? -1 : 1;
-      merged.sort((a, b) =>
+      arr.sort((a, b) =>
         itemOrderBy === "harga"
           ? (a.harga - b.harga) * dir
           : a.kode.localeCompare(b.kode) * dir
       );
 
-      if (typeof takePerCat === "number") merged = merged.slice(0, takePerCat);
-      if (!includeEmpty && merged.length === 0) continue;
+      if (typeof takePerCat === "number") arr = arr.slice(0, takePerCat);
+      if (!includeEmpty && arr.length === 0) continue;
 
-      result[catName] = merged.map(
-        ({ kode, deskripsi, satuan, harga, meta, source }: any) => ({
-          kode,
-          deskripsi,
-          satuan,
-          harga,
-          source,
-          meta,
-        })
-      );
-      totalItems += merged.length;
+      // buang hspCategoryId di output
+      result[catName] = arr.map(({ hspCategoryId, ...rest }) => rest);
+      totalItems += arr.length;
     }
 
     res.status(200).json({
@@ -599,6 +663,7 @@ export const listAllGrouped = async (req: Request, res: Response) => {
     });
   }
 };
+
 /** =========================
  *  DETAIL HSD / AHSP
  *  ========================= */
@@ -1464,15 +1529,21 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
       res.status(401).json({ status: "error", error: "Unauthorized" });
       return;
     }
-
+    const role = await getRole(req);
     const userScope = scopeOf(userId);
+
     const kode = decodeURIComponent(String(req.params.kode || "").trim());
     if (!kode) {
       res.status(400).json({ status: "error", error: "Missing kode" });
       return;
     }
 
-    const payload: {
+    // ADMIN dapat memilih: override=1 untuk tetap bikin override.
+    const forceOverride =
+      String(req.query.override || "0").toLowerCase() === "1" ||
+      String(req.body?.override || "0").toLowerCase() === "1";
+
+    const raw: {
       hspCategoryId?: string;
       kode?: string;
       deskripsi?: string;
@@ -1480,17 +1551,97 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
       source?: string | null;
     } = {};
     if (typeof req.body?.hspCategoryId === "string")
-      payload.hspCategoryId = req.body.hspCategoryId;
-    if (typeof req.body?.kode === "string") payload.kode = req.body.kode.trim();
+      raw.hspCategoryId = req.body.hspCategoryId;
+    if (typeof req.body?.kode === "string") raw.kode = req.body.kode.trim();
     if (typeof req.body?.deskripsi === "string")
-      payload.deskripsi = req.body.deskripsi.trim();
+      raw.deskripsi = req.body.deskripsi.trim();
     if (typeof req.body?.satuan === "string")
-      payload.satuan = req.body.satuan.trim();
-
+      raw.satuan = req.body.satuan.trim();
     if (typeof req.body?.source === "string") {
       const s = req.body.source.trim();
       const allowed = await getActiveSourceCodes();
-      (payload as any).source = allowed.has(s.toLowerCase()) ? s : null;
+      raw.source = allowed.has(s.toLowerCase()) ? s : null;
+    }
+
+    // ==== CABANG ADMIN (default: update GLOBAL, bukan override) ====
+    if (role === "ADMIN" && !forceOverride) {
+      const global = await prisma.hSPItem.findUnique({
+        where: { scope_kode_unique: { scope: "GLOBAL", kode } },
+      });
+      if (!global) {
+        res
+          .status(404)
+          .json({ status: "error", error: "Global item not found" });
+        return;
+      }
+
+      // Pastikan categoryId yang dikirim di-resolve ke scope GLOBAL
+      let targetCategoryId: string | undefined;
+      if (raw.hspCategoryId) {
+        targetCategoryId = await resolveCategoryIdForScope(
+          raw.hspCategoryId,
+          "GLOBAL"
+        );
+      }
+
+      const updatedGlobal = await prisma.hSPItem.update({
+        where: { id: global.id },
+        data: {
+          ...(raw.kode ? { kode: raw.kode } : {}),
+          ...(raw.deskripsi ? { deskripsi: raw.deskripsi } : {}),
+          ...(raw.satuan ? { satuan: raw.satuan } : {}),
+          ...(raw.source !== undefined ? { source: raw.source } : {}),
+          ...(typeof targetCategoryId === "string"
+            ? { hspCategoryId: targetCategoryId }
+            : {}),
+          isDeleted: false,
+          isDisabled: false,
+        },
+        select: {
+          id: true,
+          scope: true,
+          kode: true,
+          deskripsi: true,
+          satuan: true,
+          harga: true,
+          hspCategoryId: true,
+          source: true,
+        },
+      });
+
+      // Hapus/disable override ADMIN (kalau ada) supaya tidak mengalahkan GLOBAL
+      const adminOverride = await prisma.hSPItem
+        .findUnique({
+          where: { scope_kode_unique: { scope: userScope, kode } },
+          select: { id: true },
+        })
+        .catch(() => null);
+
+      if (adminOverride) {
+        // Aman: nonaktifkan override (atau bisa juga hard delete, pilih salah satu).
+        await prisma.hSPItem.update({
+          where: { id: adminOverride.id },
+          data: { isDisabled: true, isDeleted: false },
+        });
+      }
+
+      res.status(200).json({
+        status: "success",
+        data: updatedGlobal,
+        appliedTo: "GLOBAL",
+        note: "GLOBAL item updated. Any admin override for this kode has been disabled to prevent duplication.",
+      });
+      return;
+    }
+
+    // ==== CABANG OVERRIDE (USER/ADMIN dengan override=1) ====
+    // Buat/ambil override di scope pemanggil lalu update; pastikan categoryId di-resolve ke scope caller
+    const base = await prisma.hSPItem.findUnique({
+      where: { scope_kode_unique: { scope: "GLOBAL", kode } },
+    });
+    if (!base) {
+      res.status(404).json({ status: "error", error: "Item not found" });
+      return;
     }
 
     let userItem = await prisma.hSPItem
@@ -1498,14 +1649,6 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
       .catch(() => null);
 
     if (!userItem) {
-      const base = await prisma.hSPItem.findUnique({
-        where: { scope_kode_unique: { scope: "GLOBAL", kode } },
-      });
-      if (!base) {
-        res.status(404).json({ status: "error", error: "Item not found" });
-        return;
-      }
-
       userItem = await prisma.hSPItem.create({
         data: {
           scope: userScope,
@@ -1513,7 +1656,7 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
           deskripsi: base.deskripsi,
           satuan: base.satuan,
           harga: base.harga,
-          hspCategoryId: base.hspCategoryId,
+          hspCategoryId: base.hspCategoryId, // initial follow global
           isDeleted: false,
           isDisabled: false,
           source: base.source ?? null,
@@ -1521,9 +1664,27 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
       });
     }
 
+    let targetCategoryId: string | undefined;
+    if (raw.hspCategoryId) {
+      targetCategoryId = await resolveCategoryIdForScope(
+        raw.hspCategoryId,
+        userScope
+      );
+    }
+
     const updated = await prisma.hSPItem.update({
       where: { id: userItem.id },
-      data: { ...payload, isDeleted: false, isDisabled: false },
+      data: {
+        ...(raw.kode ? { kode: raw.kode } : {}),
+        ...(raw.deskripsi ? { deskripsi: raw.deskripsi } : {}),
+        ...(raw.satuan ? { satuan: raw.satuan } : {}),
+        ...(raw.source !== undefined ? { source: raw.source } : {}),
+        ...(typeof targetCategoryId === "string"
+          ? { hspCategoryId: targetCategoryId }
+          : {}),
+        isDeleted: false,
+        isDisabled: false,
+      },
       select: {
         id: true,
         scope: true,
@@ -1536,12 +1697,21 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
       },
     });
 
-    res.status(200).json({ status: "success", data: updated });
+    res.status(200).json({
+      status: "success",
+      data: updated,
+      appliedTo: userScope,
+      note:
+        role === "ADMIN"
+          ? "Admin explicitly created/updated an override (override=1). Global item is unchanged."
+          : "User override updated.",
+    });
   } catch (e: any) {
     if (e?.code === "P2002") {
-      res
-        .status(409)
-        .json({ status: "error", error: "Kode already exists in your scope" });
+      res.status(409).json({
+        status: "error",
+        error: "Kode already exists in target scope",
+      });
       return;
     }
     res.status(500).json({
@@ -1644,7 +1814,7 @@ export const deleteHspItemByKode = async (req: Request, res: Response) => {
         satuan: global.satuan,
         harga: global.harga,
         hspCategoryId: global.hspCategoryId,
-        isDeleted: true, 
+        isDeleted: true,
       },
     });
 
