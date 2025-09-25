@@ -1,3 +1,4 @@
+// src/controllers/estimation.controller.ts
 import { Request, Response } from "express";
 import prisma from "../lib/prisma";
 import {
@@ -48,7 +49,7 @@ function toBase64DataUrl(arrbuf: ArrayBuffer, ext: "png" | "jpeg") {
 }
 
 /* =========================================================
- * CREATE ESTIMATION (dipersingkat: sama seperti punyamu)
+ * Helpers HSP & Flatten item
  * =======================================================*/
 async function buildHspCodeMap(
   tx: Prisma.TransactionClient,
@@ -77,6 +78,171 @@ async function buildHspCodeMap(
   return m;
 }
 
+type ItemInput = {
+  kode?: string;
+  nama?: string;
+  satuan?: string;
+  harga?: number;
+  volume?: number;
+  hargaTotal?: number;
+  details?: Array<{
+    nama?: string;
+    jenis?: string; // "penjumlahan" | "pengurangan"
+    panjang?: number;
+    lebar?: number;
+    tinggi?: number;
+    jumlah?: number;
+    volume?: number;
+    extras?: any[];
+  }>;
+  children?: ItemInput[]; // NEW: sub-items (a., b., c.)
+};
+
+type SectionInput =
+  | {
+      title: string; // kategori
+      item: ItemInput[]; // format lama
+      groups?: never;
+    }
+  | {
+      title: string; // kategori
+      groups: Array<{ title: string; items: ItemInput[] }>; // format baru
+      item?: never;
+    };
+
+function collectCodesFromItems(items?: ItemInput[], acc: string[] = []) {
+  for (const it of items ?? []) {
+    if (it?.kode) acc.push(it.kode);
+    if (it?.children?.length) collectCodesFromItems(it.children, acc);
+  }
+  return acc;
+}
+
+function flattenItemsWithOrder(
+  items: ItemInput[],
+  opts: { estimationItemId: string; jobGroupId?: string }
+) {
+  const rows: Array<{
+    row: Prisma.ItemDetailCreateManyInput;
+    children?: ItemInput[];
+    details?: ItemInput["details"];
+  }> = [];
+
+  let localOrder = 0;
+  for (const it of items ?? []) {
+    localOrder += 1;
+    const id = randomUUID();
+    rows.push({
+      row: {
+        id,
+        estimationItemId: opts.estimationItemId,
+        jobGroupId: opts.jobGroupId ?? null,
+        parentDetailId: null,
+        order: localOrder,
+        kode: it.kode ?? "",
+        deskripsi: it.nama ?? "",
+        volume: Number(it.volume ?? 0),
+        satuan: it.satuan ?? "",
+        hargaSatuan: Number(it.harga ?? 0),
+        hargaTotal: Number(it.hargaTotal ?? 0),
+        hspItemId: undefined, // diisi setelah map kode -> HSP id
+      },
+      children: it.children,
+      details: it.details,
+    });
+  }
+  return rows;
+}
+
+async function insertItemsWithChildrenAndVolume(
+  tx: Prisma.TransactionClient,
+  flat: ReturnType<typeof flattenItemsWithOrder>,
+  hspMap: Map<string, string>
+) {
+  // 1) isi hspItemId parents
+  for (const f of flat) {
+    if (f.row.kode) {
+      const hspId = hspMap.get(f.row.kode);
+      if (hspId) (f.row as any).hspItemId = hspId;
+    }
+  }
+
+  // 2) insert parent items
+  if (flat.length)
+    await tx.itemDetail.createMany({ data: flat.map((f) => f.row) });
+
+  // 3) volumeDetails untuk parent
+  const volRowsParent: Prisma.VolumeDetailCreateManyInput[] = [];
+  for (const f of flat) {
+    for (const d of f.details ?? []) {
+      volRowsParent.push({
+        id: randomUUID(),
+        nama: d?.nama ?? "",
+        jenis: mapJenisToVolumeOp(d?.jenis || "penjumlahan"),
+        panjang: Number(d?.panjang ?? 0),
+        lebar: Number(d?.lebar ?? 0),
+        tinggi: Number(d?.tinggi ?? 0),
+        jumlah: Number(d?.jumlah ?? 0),
+        volume: Number(d?.volume ?? 0),
+        extras: Array.isArray(d?.extras) ? d.extras : [],
+        itemDetailId: f.row.id,
+      });
+    }
+  }
+  if (volRowsParent.length)
+    await tx.volumeDetail.createMany({ data: volRowsParent });
+
+  // 4) children (1 level; extendable jika mau nested >1)
+  for (const f of flat) {
+    if (!f.children?.length) continue;
+
+    let childOrder = 0;
+    const childRows: Prisma.ItemDetailCreateManyInput[] = [];
+    const volRowsChild: Prisma.VolumeDetailCreateManyInput[] = [];
+
+    for (const ch of f.children) {
+      childOrder += 1;
+      const cid = randomUUID();
+      childRows.push({
+        id: cid,
+        estimationItemId: f.row.estimationItemId,
+        jobGroupId: f.row.jobGroupId ?? null,
+        parentDetailId: f.row.id,
+        order: childOrder,
+        kode: ch.kode ?? "",
+        deskripsi: ch.nama ?? "",
+        volume: Number(ch.volume ?? 0),
+        satuan: ch.satuan ?? "",
+        hargaSatuan: Number(ch.harga ?? 0),
+        hargaTotal: Number(ch.hargaTotal ?? 0),
+        hspItemId: ch.kode ? (hspMap.get(ch.kode) ?? undefined) : undefined,
+      });
+
+      for (const d of ch.details ?? []) {
+        volRowsChild.push({
+          id: randomUUID(),
+          nama: d?.nama ?? "",
+          jenis: mapJenisToVolumeOp(d?.jenis || "penjumlahan"),
+          panjang: Number(d?.panjang ?? 0),
+          lebar: Number(d?.lebar ?? 0),
+          tinggi: Number(d?.tinggi ?? 0),
+          jumlah: Number(d?.jumlah ?? 0),
+          volume: Number(d?.volume ?? 0),
+          extras: Array.isArray(d?.extras) ? d.extras : [],
+          itemDetailId: cid,
+        });
+      }
+    }
+
+    if (childRows.length) await tx.itemDetail.createMany({ data: childRows });
+    if (volRowsChild.length)
+      await tx.volumeDetail.createMany({ data: volRowsChild });
+  }
+}
+
+/* =========================================================
+ * CREATE ESTIMATION (mendukung groups + children)
+ * =======================================================*/
 export const createEstimation = async (
   req: AuthenticatedRequest,
   res: Response
@@ -95,7 +261,9 @@ export const createEstimation = async (
     const customFields = parseMaybeJson<Record<string, string>>(
       req.body?.customFields
     );
-    const estimationItem = parseMaybeJson<any[]>(req.body?.estimationItem);
+    const estimationItem = parseMaybeJson<SectionInput[]>(
+      req.body?.estimationItem
+    );
 
     if (!projectName || !owner || ppn === undefined) {
       res
@@ -146,81 +314,70 @@ export const createEstimation = async (
         await tx.customField.createMany({ data: rows });
       }
 
-      // estimationItem (array)
+      // estimationItem (array) — dukung 2 format + children
       if (Array.isArray(estimationItem) && estimationItem.length > 0) {
-        const estItemRows: {
-          id: string;
-          title: string;
-          estimationId: string;
-        }[] = [];
-        const itemDetailRows: Prisma.ItemDetailCreateManyInput[] = [];
-        const volDetailRows: {
-          id: string;
-          nama: string;
-          jenis: "ADD" | "SUB";
-          panjang: number;
-          lebar: number;
-          tinggi: number;
-          jumlah: number;
-          volume: number;
-          extras: Prisma.InputJsonValue;
-          itemDetailId: string;
-        }[] = [];
-
-        const allCodes: string[] = [];
+        // kumpulkan semua kode untuk build map HSP sekali
+        const codes: string[] = [];
         for (const section of estimationItem) {
-          for (const detail of section?.item ?? []) {
-            if (detail?.kode) allCodes.push(detail.kode);
+          if ("item" in section && Array.isArray(section.item)) {
+            collectCodesFromItems(section.item, codes);
+          }
+          if ("groups" in section && Array.isArray(section.groups)) {
+            for (const g of section.groups)
+              collectCodesFromItems(g.items, codes);
           }
         }
-        const hspMap = await buildHspCodeMap(tx, userId, allCodes);
+        const hspMap = await buildHspCodeMap(tx, userId, codes);
 
         for (const section of estimationItem) {
           const estItemId = randomUUID();
-          estItemRows.push({
-            id: estItemId,
-            title: String(section?.title ?? ""), // pastikan string
-            estimationId: newEst.id,
+          await tx.estimationItem.create({
+            data: {
+              id: estItemId,
+              title: String(section?.title ?? ""),
+              estimationId: newEst.id,
+            },
           });
 
-          for (const detail of section?.item ?? []) {
-            const itemId = randomUUID();
-            const hspId = detail?.kode ? hspMap.get(detail.kode) : undefined;
-            itemDetailRows.push({
-              id: itemId,
-              kode: detail?.kode ?? "",
-              deskripsi: detail?.nama ?? "",
-              volume: Number(detail?.volume ?? 0),
-              satuan: detail?.satuan ?? "",
-              hargaSatuan: Number(detail?.harga ?? 0),
-              hargaTotal: Number(detail?.hargaTotal ?? 0),
-              estimationItemId: estItemId,
-              hspItemId: hspId,
-            });
-
-            for (const d of detail?.details ?? []) {
-              volDetailRows.push({
-                id: randomUUID(),
-                nama: d?.nama ?? "",
-                jenis: mapJenisToVolumeOp(d?.jenis),
-                panjang: Number(d?.panjang ?? 0),
-                lebar: Number(d?.lebar ?? 0),
-                tinggi: Number(d?.tinggi ?? 0),
-                jumlah: Number(d?.jumlah ?? 0),
-                volume: Number(d?.volume ?? 0),
-                extras: Array.isArray(d?.extras) ? d.extras : [],
-                itemDetailId: itemId,
+          // (A) format baru dgn groups
+          if (
+            "groups" in section &&
+            Array.isArray(section.groups) &&
+            section.groups.length
+          ) {
+            let groupOrder = 0;
+            for (const g of section.groups) {
+              groupOrder += 1;
+              const gid = randomUUID();
+              await tx.estimationJobGroup.create({
+                data: {
+                  id: gid,
+                  title: String(g.title ?? ""),
+                  order: groupOrder,
+                  estimationItemId: estItemId,
+                },
               });
+
+              const flat = flattenItemsWithOrder(g.items ?? [], {
+                estimationItemId: estItemId,
+                jobGroupId: gid,
+              });
+              await insertItemsWithChildrenAndVolume(tx, flat, hspMap);
             }
           }
-        }
 
-        if (estItemRows.length)
-          await tx.estimationItem.createMany({ data: estItemRows });
-        if (itemDetailRows.length)
-          await tx.itemDetail.createMany({ data: itemDetailRows });
-        if (volDetailRows.length)
-          await tx.volumeDetail.createMany({ data: volDetailRows });
+          // (B) format lama tanpa groups (langsung item)
+          if (
+            "item" in section &&
+            Array.isArray(section.item) &&
+            section.item.length
+          ) {
+            const flat = flattenItemsWithOrder(section.item, {
+              estimationItemId: estItemId,
+            });
+            await insertItemsWithChildrenAndVolume(tx, flat, hspMap);
+          }
+        }
       }
 
       return { newEstimationId: newEst.id };
@@ -231,7 +388,52 @@ export const createEstimation = async (
       include: {
         author: { select: { id: true, name: true, email: true } },
         customFields: true,
-        items: { include: { details: { include: { volumeDetails: true } } } },
+        items: {
+          include: {
+            groups: {
+              orderBy: { order: "asc" },
+              include: {
+                details: {
+                  where: { parentDetailId: null },
+                  orderBy: { order: "asc" },
+                  include: {
+                    children: { orderBy: { order: "asc" } },
+                    volumeDetails: true,
+                    hspItem: {
+                      include: {
+                        category: true,
+                        ahsp: {
+                          include: {
+                            components: { include: { masterItem: true } },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            // top-level items tanpa group
+            details: {
+              where: { jobGroupId: null, parentDetailId: null },
+              orderBy: { order: "asc" },
+              include: {
+                children: { orderBy: { order: "asc" } },
+                volumeDetails: true,
+                hspItem: {
+                  include: {
+                    category: true,
+                    ahsp: {
+                      include: {
+                        components: { include: { masterItem: true } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     });
 
@@ -249,7 +451,7 @@ export const createEstimation = async (
 };
 
 /* =========================================================
- * GET/LIST/UPDATE/DELETE/STATS (dipersingkat: sama seperti punyamu)
+ * LIST / GET BY ID (include struktur baru)
  * =======================================================*/
 export const getEstimations = async (
   req: AuthenticatedRequest,
@@ -279,7 +481,51 @@ export const getEstimations = async (
         include: {
           author: { select: { id: true, name: true, email: true } },
           customFields: true,
-          items: { include: { details: { include: { volumeDetails: true } } } },
+          items: {
+            include: {
+              groups: {
+                orderBy: { order: "asc" },
+                include: {
+                  details: {
+                    where: { parentDetailId: null },
+                    orderBy: { order: "asc" },
+                    include: {
+                      children: { orderBy: { order: "asc" } },
+                      volumeDetails: true,
+                      hspItem: {
+                        include: {
+                          category: true,
+                          ahsp: {
+                            include: {
+                              components: { include: { masterItem: true } },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              details: {
+                where: { jobGroupId: null, parentDetailId: null },
+                orderBy: { order: "asc" },
+                include: {
+                  children: { orderBy: { order: "asc" } },
+                  volumeDetails: true,
+                  hspItem: {
+                    include: {
+                      category: true,
+                      ahsp: {
+                        include: {
+                          components: { include: { masterItem: true } },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
         },
         orderBy: { createdAt: "desc" },
         skip: offset,
@@ -321,7 +567,51 @@ export const getEstimationById = async (
       include: {
         author: { select: { id: true, name: true, email: true } },
         customFields: true,
-        items: { include: { details: { include: { volumeDetails: true } } } },
+        items: {
+          include: {
+            groups: {
+              orderBy: { order: "asc" },
+              include: {
+                details: {
+                  where: { parentDetailId: null },
+                  orderBy: { order: "asc" },
+                  include: {
+                    children: { orderBy: { order: "asc" } },
+                    volumeDetails: true,
+                    hspItem: {
+                      include: {
+                        category: true,
+                        ahsp: {
+                          include: {
+                            components: { include: { masterItem: true } },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            details: {
+              where: { jobGroupId: null, parentDetailId: null },
+              orderBy: { order: "asc" },
+              include: {
+                children: { orderBy: { order: "asc" } },
+                volumeDetails: true,
+                hspItem: {
+                  include: {
+                    category: true,
+                    ahsp: {
+                      include: {
+                        components: { include: { masterItem: true } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     });
 
@@ -339,6 +629,9 @@ export const getEstimationById = async (
   }
 };
 
+/* =========================================================
+ * UPDATE ESTIMATION (hapus & tulis ulang; dukung groups + children)
+ * =======================================================*/
 export const updateEstimation = async (
   req: AuthenticatedRequest,
   res: Response
@@ -366,7 +659,9 @@ export const updateEstimation = async (
     const customFields = parseMaybeJson<Record<string, string>>(
       req.body?.customFields
     );
-    const estimationItem = parseMaybeJson<any[]>(req.body?.estimationItem);
+    const estimationItem = parseMaybeJson<SectionInput[]>(
+      req.body?.estimationItem
+    );
 
     let imageUrl: string | undefined;
     let imageId: string | undefined;
@@ -408,89 +703,81 @@ export const updateEstimation = async (
         }
       }
 
-      // estimationItem (array)
+      // estimationItem (array) — rewrite total
       if (Array.isArray(estimationItem)) {
+        // Hapus berurutan (volume -> item -> group -> section)
         await tx.volumeDetail.deleteMany({
           where: { itemDetail: { estimationItem: { estimationId: id } } },
         });
         await tx.itemDetail.deleteMany({
           where: { estimationItem: { estimationId: id } },
         });
+        await tx.estimationJobGroup.deleteMany({
+          where: { estimationItem: { estimationId: id } },
+        });
         await tx.estimationItem.deleteMany({ where: { estimationId: id } });
 
-        const estItemRows: {
-          id: string;
-          title: string;
-          estimationId: string;
-        }[] = [];
-        const itemDetailRows: Prisma.ItemDetailCreateManyInput[] = [];
-        const volDetailRows: {
-          id: string;
-          nama: string;
-          jenis: "ADD" | "SUB";
-          panjang: number;
-          lebar: number;
-          tinggi: number;
-          jumlah: number;
-          volume: number;
-          extras: Prisma.InputJsonValue;
-          itemDetailId: string;
-        }[] = [];
-
-        const allCodes: string[] = [];
+        // Kumpulkan kode utk HSP map
+        const codes: string[] = [];
         for (const section of estimationItem ?? []) {
-          for (const detail of section?.item ?? []) {
-            if (detail?.kode) allCodes.push(detail.kode);
+          if ("item" in section && Array.isArray(section.item)) {
+            collectCodesFromItems(section.item, codes);
+          }
+          if ("groups" in section && Array.isArray(section.groups)) {
+            for (const g of section.groups)
+              collectCodesFromItems(g.items, codes);
           }
         }
-        const hspMap = await buildHspCodeMap(tx, userId, allCodes);
+        const hspMap = await buildHspCodeMap(tx, userId, codes);
 
+        // Tulis ulang
         for (const section of estimationItem) {
           const estItemId = randomUUID();
-          estItemRows.push({
-            id: estItemId,
-            title: String(section?.title ?? ""), // WAJIB ada
-            estimationId: id,
+          await tx.estimationItem.create({
+            data: {
+              id: estItemId,
+              title: String(section?.title ?? ""),
+              estimationId: id,
+            },
           });
 
-          for (const detail of section?.item ?? []) {
-            const itemId = randomUUID();
-            const hspId = detail?.kode ? hspMap.get(detail.kode) : undefined;
-            itemDetailRows.push({
-              id: itemId,
-              kode: detail?.kode ?? "",
-              deskripsi: detail?.nama ?? "",
-              volume: Number(detail?.volume ?? 0),
-              satuan: detail?.satuan ?? "",
-              hargaSatuan: Number(detail?.harga ?? 0),
-              hargaTotal: Number(detail?.hargaTotal ?? 0),
-              estimationItemId: estItemId,
-              hspItemId: hspId,
-            });
-
-            for (const d of detail?.details ?? []) {
-              volDetailRows.push({
-                id: randomUUID(),
-                nama: d?.nama ?? "",
-                jenis: mapJenisToVolumeOp(d?.jenis),
-                panjang: Number(d?.panjang ?? 0),
-                lebar: Number(d?.lebar ?? 0),
-                tinggi: Number(d?.tinggi ?? 0),
-                jumlah: Number(d?.jumlah ?? 0),
-                volume: Number(d?.volume ?? 0),
-                extras: Array.isArray(d?.extras) ? d.extras : [],
-                itemDetailId: itemId,
+          if (
+            "groups" in section &&
+            Array.isArray(section.groups) &&
+            section.groups.length
+          ) {
+            let groupOrder = 0;
+            for (const g of section.groups) {
+              groupOrder += 1;
+              const gid = randomUUID();
+              await tx.estimationJobGroup.create({
+                data: {
+                  id: gid,
+                  title: String(g.title ?? ""),
+                  order: groupOrder,
+                  estimationItemId: estItemId,
+                },
               });
+
+              const flat = flattenItemsWithOrder(g.items ?? [], {
+                estimationItemId: estItemId,
+                jobGroupId: gid,
+              });
+              await insertItemsWithChildrenAndVolume(tx, flat, hspMap);
             }
           }
-        }
 
-        if (estItemRows.length)
-          await tx.estimationItem.createMany({ data: estItemRows });
-        if (itemDetailRows.length)
-          await tx.itemDetail.createMany({ data: itemDetailRows });
-        if (volDetailRows.length)
-          await tx.volumeDetail.createMany({ data: volDetailRows });
+          if (
+            "item" in section &&
+            Array.isArray(section.item) &&
+            section.item.length
+          ) {
+            const flat = flattenItemsWithOrder(section.item, {
+              estimationItemId: estItemId,
+            });
+            await insertItemsWithChildrenAndVolume(tx, flat, hspMap);
+          }
+        }
       }
 
       return { updatedId: id };
@@ -501,7 +788,51 @@ export const updateEstimation = async (
       include: {
         author: { select: { id: true, name: true, email: true } },
         customFields: true,
-        items: { include: { details: { include: { volumeDetails: true } } } },
+        items: {
+          include: {
+            groups: {
+              orderBy: { order: "asc" },
+              include: {
+                details: {
+                  where: { parentDetailId: null },
+                  orderBy: { order: "asc" },
+                  include: {
+                    children: { orderBy: { order: "asc" } },
+                    volumeDetails: true,
+                    hspItem: {
+                      include: {
+                        category: true,
+                        ahsp: {
+                          include: {
+                            components: { include: { masterItem: true } },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            details: {
+              where: { jobGroupId: null, parentDetailId: null },
+              orderBy: { order: "asc" },
+              include: {
+                children: { orderBy: { order: "asc" } },
+                volumeDetails: true,
+                hspItem: {
+                  include: {
+                    category: true,
+                    ahsp: {
+                      include: {
+                        components: { include: { masterItem: true } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     });
 
@@ -518,6 +849,9 @@ export const updateEstimation = async (
   }
 };
 
+/* =========================================================
+ * DELETE / STATS (tidak berubah)
+ * =======================================================*/
 export const deleteEstimation = async (
   req: AuthenticatedRequest,
   res: Response
@@ -540,11 +874,28 @@ export const deleteEstimation = async (
       await tx.volumeDetail.deleteMany({
         where: { itemDetail: { estimationItem: { estimationId: id } } },
       });
+
       await tx.itemDetail.deleteMany({
+        where: {
+          estimationItem: { estimationId: id },
+          parentDetailId: { not: null },
+        },
+      });
+      await tx.itemDetail.deleteMany({
+        where: {
+          estimationItem: { estimationId: id },
+          parentDetailId: null,
+        },
+      });
+
+      await tx.estimationJobGroup.deleteMany({
         where: { estimationItem: { estimationId: id } },
       });
-      await tx.estimationItem.deleteMany({ where: { estimationId: id } });
+
       await tx.customField.deleteMany({ where: { estimationId: id } });
+
+      await tx.estimationItem.deleteMany({ where: { estimationId: id } });
+
       await tx.estimation.delete({ where: { id } });
     });
 
@@ -581,9 +932,8 @@ export const getEstimationStats = async (
 };
 
 /* =========================================================
- * DOWNLOADERS
+ * DOWNLOADERS (include struktur baru)
  * =======================================================*/
-
 export const downloadEstimationExcel = async (
   req: AuthenticatedRequest,
   res: Response
@@ -602,8 +952,34 @@ export const downloadEstimationExcel = async (
         customFields: true,
         items: {
           include: {
-            details: {
+            groups: {
+              orderBy: { order: "asc" },
               include: {
+                details: {
+                  where: { parentDetailId: null },
+                  orderBy: { order: "asc" },
+                  include: {
+                    children: { orderBy: { order: "asc" } },
+                    volumeDetails: true,
+                    hspItem: {
+                      include: {
+                        category: true,
+                        ahsp: {
+                          include: {
+                            components: { include: { masterItem: true } },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            details: {
+              where: { jobGroupId: null, parentDetailId: null },
+              orderBy: { order: "asc" },
+              include: {
+                children: { orderBy: { order: "asc" } },
                 volumeDetails: true,
                 hspItem: {
                   include: {
@@ -661,7 +1037,7 @@ export const downloadEstimationExcel = async (
         const base64 = toBase64DataUrl(resp.data, ext);
         logo = { base64, extension: ext };
       } catch {
-        // silent: kalau gagal ambil logo fallback, lanjut tanpa logo
+        // silent
       }
     }
 
@@ -726,8 +1102,34 @@ export const downloadEstimationPdf = async (
         customFields: true,
         items: {
           include: {
-            details: {
+            groups: {
+              orderBy: { order: "asc" },
               include: {
+                details: {
+                  where: { parentDetailId: null },
+                  orderBy: { order: "asc" },
+                  include: {
+                    children: { orderBy: { order: "asc" } },
+                    volumeDetails: true,
+                    hspItem: {
+                      include: {
+                        category: true,
+                        ahsp: {
+                          include: {
+                            components: { include: { masterItem: true } },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            details: {
+              where: { jobGroupId: null, parentDetailId: null },
+              orderBy: { order: "asc" },
+              include: {
+                children: { orderBy: { order: "asc" } },
                 volumeDetails: true,
                 hspItem: {
                   include: {
@@ -782,8 +1184,6 @@ export const downloadEstimationPdf = async (
     const safeName = sanitizeFileName(estimation.projectName);
     const fileName = `RAB_${safeName}.pdf`;
 
-    // Contoh: RAB saja (tanpa AHSP/Volume). Jika nanti buat endpoint AHSP/Volume,
-    // cukup JANGAN kirim logo => otomatis "no-image mode" (aman).
     const pdfBuffer = await buildEstimationPdf(
       estimation as unknown as EstimationWithRelations,
       {

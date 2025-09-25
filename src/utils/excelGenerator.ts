@@ -1058,12 +1058,18 @@ export async function buildEstimationExcel(
     c.border = BORDER_THIN as any;
   });
   [1, 2, 3, 4].forEach((col) => (h2.getCell(col).border = BORDER_THIN as any));
-
+  //
   let currentRow = 7;
+
+  // helper angka romawi & arab
+  const toRoman = (n: number) => roman(n);
+  const toArabic = (n: number) => String(n);
+
   est.items.forEach((section, sIdx) => {
+    // ===== Header Section (Kategori) =====
     sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
     const secCell = sRAB.getCell(`A${currentRow}`);
-    secCell.value = `${roman(sIdx + 1)}    ${section.title.toUpperCase()}`; // 4 spasi
+    secCell.value = `${toRoman(sIdx + 1)}    ${section.title?.toUpperCase?.() ?? "-"}`;
     secCell.font = FONT.h2 as any;
     secCell.fill = {
       type: "pattern",
@@ -1074,54 +1080,145 @@ export async function buildEstimationExcel(
     secCell.alignment = { horizontal: "left" };
     currentRow++;
 
-    let no = 1;
-    let subtotal = 0;
+    let sectionSubtotal = 0;
 
-    (section.details || []).forEach((d) => {
-      const jumlah =
-        (typeof d.hargaTotal === "number" ? d.hargaTotal : undefined) ??
-        Number(d.volume || 0) * Number(d.hargaSatuan || 0);
-      const safeJumlah = Number.isFinite(jumlah) ? Number(jumlah) : 0;
+    const hasGroups =
+      Array.isArray((section as any).groups) &&
+      (section as any).groups.length > 0;
 
-      const r = sRAB.getRow(currentRow++);
-      r.getCell(1).value = no++;
-      r.getCell(2).value = d.deskripsi || "-";
-      r.getCell(3).value = d.satuan || "-";
-      r.getCell(4).value = Number(d.volume || 0);
-      r.getCell(5).value = Number(d.hargaSatuan || 0);
-      r.getCell(6).value = safeJumlah;
+    if (hasGroups) {
+      // ========= FORMAT BARU: ada groups =========
+      const groups = (section as any).groups as Array<{
+        id: string;
+        title: string;
+        details: any[];
+      }>;
 
-      subtotal += safeJumlah;
-
-      [1, 2, 3, 4, 5, 6].forEach(
-        (c) => (r.getCell(c).border = BORDER_THIN as any)
-      );
-      r.getCell(2).alignment = { wrapText: true };
-      r.getCell(4).alignment = { horizontal: "right" };
-      r.getCell(5).numFmt = NUMFMT_IDR;
-      r.getCell(6).numFmt = NUMFMT_IDR;
-
-      if ((no - 1) % 2 === 0)
-        r.fill = {
+      groups.forEach((g, gIdx) => {
+        // -- header group
+        sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
+        const gCell = sRAB.getCell(`A${currentRow}`);
+        gCell.value = `${toRoman(sIdx + 1)}.${toArabic(gIdx + 1)}    ${g.title || "-"}`;
+        gCell.font = { ...(FONT.base as any), bold: true };
+        gCell.fill = {
           type: "pattern",
           pattern: "solid",
           fgColor: { argb: COLORS.zebra },
         };
-    });
+        gCell.border = BORDER_THIN as any;
+        gCell.alignment = { horizontal: "left" };
+        currentRow++;
 
+        let groupSubtotal = 0;
+        let rowNo = 1; // nomor di dalam group
+
+        (g.details || []).forEach((d: any) => {
+          const jumlah =
+            (typeof d.hargaTotal === "number" ? d.hargaTotal : undefined) ??
+            Number(d.volume || 0) * Number(d.hargaSatuan || 0);
+          const safeJumlah = Number.isFinite(jumlah) ? Number(jumlah) : 0;
+
+          const r = sRAB.getRow(currentRow++);
+          r.getCell(1).value = rowNo++; // No
+          r.getCell(2).value = d.deskripsi || "-"; // Uraian
+          r.getCell(3).value = d.satuan || "-"; // Satuan
+          r.getCell(4).value = Number(d.volume || 0); // Volume
+          r.getCell(5).value = Number(d.hargaSatuan || 0); // Harga Satuan
+          r.getCell(6).value = safeJumlah; // Jumlah
+
+          groupSubtotal += safeJumlah;
+
+          [1, 2, 3, 4, 5, 6].forEach(
+            (c) => (r.getCell(c).border = BORDER_THIN as any)
+          );
+          r.getCell(2).alignment = { wrapText: true };
+          r.getCell(4).alignment = { horizontal: "right" };
+          r.getCell(5).numFmt = NUMFMT_IDR;
+          r.getCell(6).numFmt = NUMFMT_IDR;
+
+          if ((rowNo - 1) % 2 === 0) {
+            r.fill = {
+              type: "pattern",
+              pattern: "solid",
+              fgColor: { argb: COLORS.zebra },
+            };
+          }
+        });
+
+        // -- subtotal group
+        sRAB.mergeCells(`A${currentRow}:D${currentRow}`);
+        const emptyG = sRAB.getCell(`A${currentRow}`);
+        emptyG.value = "";
+        emptyG.border = BORDER_THIN as any;
+
+        const labG = sRAB.getCell(`E${currentRow}`);
+        labG.value = `Jumlah ${toRoman(sIdx + 1)}.${toArabic(gIdx + 1)}`;
+        labG.font = { ...(FONT.base as any), bold: true };
+        labG.alignment = { horizontal: "right" };
+        labG.border = BORDER_THIN as any;
+
+        const totG = sRAB.getCell(`F${currentRow}`);
+        totG.value = groupSubtotal;
+        totG.font = { ...(FONT.base as any), bold: true };
+        totG.numFmt = NUMFMT_IDR;
+        totG.alignment = { horizontal: "right" };
+        totG.border = BORDER_THIN as any;
+
+        currentRow++;
+
+        sectionSubtotal += groupSubtotal;
+      });
+    } else {
+      // ========= FORMAT LAMA: details langsung di section =========
+      let rowNo = 1;
+      (section.details || []).forEach((d) => {
+        const jumlah =
+          (typeof d.hargaTotal === "number" ? d.hargaTotal : undefined) ??
+          Number(d.volume || 0) * Number(d.hargaSatuan || 0);
+        const safeJumlah = Number.isFinite(jumlah) ? Number(jumlah) : 0;
+
+        const r = sRAB.getRow(currentRow++);
+        r.getCell(1).value = rowNo++;
+        r.getCell(2).value = d.deskripsi || "-";
+        r.getCell(3).value = d.satuan || "-";
+        r.getCell(4).value = Number(d.volume || 0);
+        r.getCell(5).value = Number(d.hargaSatuan || 0);
+        r.getCell(6).value = safeJumlah;
+
+        sectionSubtotal += safeJumlah;
+
+        [1, 2, 3, 4, 5, 6].forEach(
+          (c) => (r.getCell(c).border = BORDER_THIN as any)
+        );
+        r.getCell(2).alignment = { wrapText: true };
+        r.getCell(4).alignment = { horizontal: "right" };
+        r.getCell(5).numFmt = NUMFMT_IDR;
+        r.getCell(6).numFmt = NUMFMT_IDR;
+
+        if ((rowNo - 1) % 2 === 0) {
+          r.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: COLORS.zebra },
+          };
+        }
+      });
+    }
+
+    // ===== Subtotal Section =====
     sRAB.mergeCells(`A${currentRow}:D${currentRow}`);
     const empty = sRAB.getCell(`A${currentRow}`);
     empty.value = "";
     empty.border = BORDER_THIN as any;
 
     const lab = sRAB.getCell(`E${currentRow}`);
-    lab.value = `Jumlah ${roman(sIdx + 1)}`;
+    lab.value = `Jumlah ${toRoman(sIdx + 1)}`;
     lab.font = { ...(FONT.base as any), bold: true };
     lab.alignment = { horizontal: "right" };
     lab.border = BORDER_THIN as any;
 
     const totCell = sRAB.getCell(`F${currentRow}`);
-    totCell.value = subtotal;
+    totCell.value = sectionSubtotal;
     totCell.font = { ...(FONT.base as any), bold: true };
     totCell.numFmt = NUMFMT_IDR;
     totCell.alignment = { horizontal: "right" };

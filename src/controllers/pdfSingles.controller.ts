@@ -94,7 +94,29 @@ async function loadEstimation(userId: string, id: string) {
       customFields: true,
       items: {
         include: {
+          groups: {
+            orderBy: { order: "asc" },
+            include: {
+              details: {
+                orderBy: { order: "asc" },
+                include: {
+                  volumeDetails: true,
+                  hspItem: {
+                    include: {
+                      category: true,
+                      ahsp: {
+                        include: {
+                          components: { include: { masterItem: true } },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
           details: {
+            orderBy: { order: "asc" },
             include: {
               volumeDetails: true,
               hspItem: {

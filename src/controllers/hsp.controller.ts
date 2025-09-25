@@ -203,7 +203,7 @@ export const listCategories = async (req: Request, res: Response) => {
     merged.sort((a, b) => {
       const ta = new Date(a.createdAt).getTime();
       const tb = new Date(b.createdAt).getTime();
-      return ta - tb; 
+      return ta - tb;
     });
 
     const total = merged.length;
@@ -523,7 +523,8 @@ export const listAllGrouped = async (req: Request, res: Response) => {
       // Kalau tidak ada di dua-duanya (harusnya tidak mungkin) skip
       if (!uCat && !gCat) continue;
 
-      const whereUser: any = { isDeleted: false, scope: userScope };
+      const whereUser: any = { scope: userScope };
+      // GLOBAL: tetap hide yang terhapus
       const whereGlobal: any = { isDeleted: false, scope: "GLOBAL" };
 
       // Penting: user item bisa refer ke category GLOBAL (override lama),
@@ -1554,6 +1555,7 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
 /** DELETE /hsp/items/by-kode/:kode (tombstone) */
 export const deleteHspItemByKode = async (req: Request, res: Response) => {
   try {
+    const role = await getRole(req);
     const userId = (req as any).user?.id as string | undefined;
     if (!userId) {
       res.status(401).json({ status: "error", error: "Unauthorized" });
@@ -1567,6 +1569,50 @@ export const deleteHspItemByKode = async (req: Request, res: Response) => {
       return;
     }
 
+    // ===== ADMIN: prioritas hapus di GLOBAL =====
+    if (role === "ADMIN") {
+      const global = await prisma.hSPItem.findUnique({
+        where: { scope_kode_unique: { scope: "GLOBAL", kode } },
+      });
+
+      if (global) {
+        await prisma.hSPItem.update({
+          where: { id: global.id },
+          data: { isDeleted: true },
+        });
+        res.status(200).json({
+          status: "success",
+          message: "Global item soft-deleted",
+          scope: "GLOBAL",
+        });
+        return;
+      }
+
+      // Tidak ada di GLOBAL → hapus di scope admin sendiri (override admin) jika ada
+      const adminItem = await prisma.hSPItem
+        .findUnique({
+          where: { scope_kode_unique: { scope: userScope, kode } },
+        })
+        .catch(() => null);
+
+      if (adminItem) {
+        await prisma.hSPItem.update({
+          where: { id: adminItem.id },
+          data: { isDeleted: true },
+        });
+        res.status(200).json({
+          status: "success",
+          message: "Admin override soft-deleted in your scope",
+          scope: userScope,
+        });
+        return;
+      }
+
+      res.status(404).json({ status: "error", error: "Item not found" });
+      return;
+    }
+
+    // ===== USER: mekanisme tombstone di scope user =====
     const userItem = await prisma.hSPItem
       .findUnique({ where: { scope_kode_unique: { scope: userScope, kode } } })
       .catch(() => null);
@@ -1598,7 +1644,7 @@ export const deleteHspItemByKode = async (req: Request, res: Response) => {
         satuan: global.satuan,
         harga: global.harga,
         hspCategoryId: global.hspCategoryId,
-        isDeleted: true,
+        isDeleted: true, 
       },
     });
 
@@ -1614,7 +1660,6 @@ export const deleteHspItemByKode = async (req: Request, res: Response) => {
     });
   }
 };
-
 /** PATCH /hsp/items/by-kode/:kode/override/active  { active: boolean } */
 export const setHspOverrideActive = async (
   req: Request,
