@@ -71,9 +71,26 @@ model EstimationItem {
   estimation   Estimation @relation(fields: [estimationId], references: [id])
   estimationId String
 
+  groups  EstimationJobGroup[]
   details ItemDetail[]
 
   @@map("estimation_items")
+}
+
+model EstimationJobGroup {
+  id               String         @id @default(uuid())
+  title            String
+  order            Int            @default(0)
+  estimationItem   EstimationItem @relation(fields: [estimationItemId], references: [id], onDelete: Cascade)
+  estimationItemId String
+
+  details ItemDetail[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([estimationItemId, order])
+  @@map("estimation_job_groups")
 }
 
 model ItemDetail {
@@ -85,14 +102,22 @@ model ItemDetail {
   hargaSatuan Float
   hargaTotal  Float
 
-  estimationItem   EstimationItem @relation(fields: [estimationItemId], references: [id])
+  estimationItem   EstimationItem      @relation(fields: [estimationItemId], references: [id])
   estimationItemId String
+  jobGroup         EstimationJobGroup? @relation(fields: [jobGroupId], references: [id])
+  jobGroupId       String?
+
+  parent         ItemDetail?  @relation("ItemDetailToSelf", fields: [parentDetailId], references: [id])
+  children       ItemDetail[] @relation("ItemDetailToSelf")
+  parentDetailId String?
+  order          Int          @default(0)
 
   hspItem   HSPItem? @relation(fields: [hspItemId], references: [id], onDelete: SetNull)
   hspItemId String?
 
   volumeDetails VolumeDetail[]
 
+  @@index([estimationItemId, jobGroupId, parentDetailId, order])
   @@map("item_details")
 }
 
@@ -178,14 +203,25 @@ enum MasterItemType {
 
 model SourceTag {
   id        String   @id @default(uuid())
-  code      String   @unique               
-  label     String                         
+  code      String   @unique
+  label     String
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@map("source_tags")
 }
+
+model Units {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  label     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("units")
+}
+
 model MasterItem {
   id    String         @id @default(uuid())
   scope String         @default("GLOBAL")

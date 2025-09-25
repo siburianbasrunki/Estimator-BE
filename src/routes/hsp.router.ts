@@ -44,6 +44,7 @@ import {
 } from "../controllers/ahspRecipe.controller";
 import { importMasterLabor, importMasterMaterials } from "../controllers/masterImport.controller";
 import { createSource, deleteSource, listSources, updateSource } from "../controllers/source.controller";
+import { createUnit, deleteUnit, listUnits, updateUnit } from "../controllers/units.controller";
 
 const router = express.Router();
 
@@ -93,13 +94,13 @@ router.get("/master/others", authenticate, async (req, res) => {
   await listMasterGeneric(req, res);
 });
 
-router.post("/master", authenticate, createMasterItem);
 router.get("/master/:id", authenticate, getMasterItem);
+router.post("/master", authenticate, createMasterItem);
 router.patch("/master/:id", authenticate, updateMasterItem);
-router.delete("/master/:id", authenticate, deleteMasterItem);
-router.get("/master/by-code/:code", authenticate, getMasterItemByCode);
 router.patch("/master/by-code/:code", authenticate, updateMasterItemByCode);
 router.delete("/master/by-code/:code", authenticate, deleteMasterItemByCode);
+router.delete("/master/:id", authenticate, deleteMasterItem);
+router.get("/master/by-code/:code", authenticate, getMasterItemByCode);
 /** AHSP */
 router.patch(
   "/items/by-kode/:kode/recipe",
@@ -126,4 +127,11 @@ router.get("/sources", authenticate, listSources);
 router.post("/sources", authenticate, createSource);
 router.patch("/sources/:id", authenticate, updateSource);
 router.delete("/sources/:id", authenticate, deleteSource);
+
+// units
+
+router.get("/units", authenticate, listUnits);
+router.post("/units", authenticate, createUnit);
+router.patch("/units/:id", authenticate, updateUnit);
+router.delete("/units/:id", authenticate, deleteUnit);
 export default router;

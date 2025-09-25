@@ -37,7 +37,17 @@ export type EstimationDetailWithMore = ItemDetail & {
 export type EstimationWithRelations = Estimation & {
   author: Pick<User, "id" | "name" | "email">;
   customFields: CustomField[];
-  items: (EstimationItem & { details: EstimationDetailWithMore[] })[];
+  items: Array<
+    EstimationItem & {
+      details: EstimationDetailWithMore[];
+      groups?: Array<{
+        id: string;
+        title: string;
+        order?: number | null;
+        details: EstimationDetailWithMore[];
+      }>;
+    }
+  >;
 };
 
 // =========================
@@ -207,10 +217,17 @@ export async function buildEstimationPdf(
       { text: "Jumlah (Rp)", style: "th" },
     ],
   ];
+
+  // Helper total semua detail (top-level & di dalam groups)
+  const sumDetail = (d: any) =>
+    N(d?.hargaTotal, N(d?.volume, 0) * N(d?.hargaSatuan, 0));
+
+  // rakit rows per-section
   est.items.forEach((section, sIdx) => {
+    // Header Section
     rabBody.push([
       {
-        text: `${roman(sIdx + 1)} ${section.title.toUpperCase()}`,
+        text: `${roman(sIdx + 1)}    ${(section.title || "-").toUpperCase()}`,
         colSpan: 6,
         bold: true,
         fillColor: "#E0F2FE",
@@ -221,33 +238,134 @@ export async function buildEstimationPdf(
       {},
       {},
     ]);
-    let no = 1;
-    let subtotal = 0;
-    (section.details || []).forEach((d) => {
-      const jumlah =
-        Number(d.hargaTotal ?? Number(d.volume) * Number(d.hargaSatuan)) || 0;
-      subtotal += jumlah;
-      rabBody.push([
-        { text: String(no++), alignment: "center" },
-        d.deskripsi || "-",
-        d.satuan || "-",
-        String(d.volume || 0),
-        { text: idr(Number(d.hargaSatuan || 0)), alignment: "right" },
-        { text: idr(jumlah), alignment: "right" },
-      ]);
-    });
+
+    let sectionSubtotal = 0;
+
+    const hasGroups =
+      Array.isArray((section as any).groups) &&
+      (section as any).groups.length > 0;
+
+    if (hasGroups) {
+      const groups = (section as any).groups as Array<{
+        title: string;
+        details: any[];
+      }>;
+
+      groups.forEach((g, gIdx) => {
+        // Header Group
+        rabBody.push([
+          {
+            text: `${roman(sIdx + 1)}.${gIdx + 1}    ${g.title || "-"}`,
+            colSpan: 6,
+            bold: true,
+            fillColor: "#F8FAFC",
+          },
+          {},
+          {},
+          {},
+          {},
+          {},
+        ]);
+
+        let groupSubtotal = 0;
+        let no = 1;
+
+        (g.details || []).forEach((d) => {
+          const jumlah = sumDetail(d);
+          groupSubtotal += jumlah;
+
+          rabBody.push([
+            { text: String(no++), alignment: "center" },
+            d.deskripsi || "-",
+            d.satuan || "-",
+            String(N(d.volume, 0)),
+            { text: idr(N(d.hargaSatuan, 0)), alignment: "right" },
+            { text: idr(jumlah), alignment: "right" },
+          ]);
+        });
+
+        // Subtotal Group
+        rabBody.push([
+          { text: "", colSpan: 4 },
+          {},
+          {},
+          {},
+          {
+            text: `Jumlah ${roman(sIdx + 1)}.${gIdx + 1}`,
+            bold: true,
+            alignment: "right",
+          },
+          { text: idr(groupSubtotal), bold: true, alignment: "right" },
+        ]);
+
+        sectionSubtotal += groupSubtotal;
+      });
+    }
+
+    // Detail langsung (format lama / mix)
+    if ((section.details || []).length > 0) {
+      let no = 1;
+      let directSubtotal = 0;
+      (section.details || []).forEach((d) => {
+        const jumlah = sumDetail(d);
+        directSubtotal += jumlah;
+        rabBody.push([
+          { text: String(no++), alignment: "center" },
+          d.deskripsi || "-",
+          d.satuan || "-",
+          String(N(d.volume, 0)),
+          { text: idr(N(d.hargaSatuan, 0)), alignment: "right" },
+          { text: idr(jumlah), alignment: "right" },
+        ]);
+      });
+
+      if (hasGroups) {
+        // bila kombinasi groups + direct details, tampilkan subtotal untuk direct details
+        rabBody.push([
+          { text: "", colSpan: 4 },
+          {},
+          {},
+          {},
+          {
+            text: `Jumlah ${roman(sIdx + 1)}.D`,
+            bold: true,
+            alignment: "right",
+          },
+          { text: idr(directSubtotal), bold: true, alignment: "right" },
+        ]);
+      }
+
+      sectionSubtotal += directSubtotal;
+    }
+
+    // Subtotal Section
     rabBody.push([
       { text: "", colSpan: 4 },
       {},
       {},
       {},
       { text: `Jumlah ${roman(sIdx + 1)}`, bold: true, alignment: "right" },
-      { text: idr(subtotal), bold: true, alignment: "right" },
+      { text: idr(sectionSubtotal), bold: true, alignment: "right" },
     ]);
   });
 
-  const { subtotal, ppnAmount, grandTotal } = calcTotals(est as any);
+  // Hitung total keseluruhan dari semua detail (top-level + groups)
+  const subtotalAll = est.items.reduce((acc, sec) => {
+    const fromDirect = (sec.details || []).reduce(
+      (s, d) => s + sumDetail(d),
+      0
+    );
+    const fromGroups = ((sec as any).groups || []).reduce(
+      (sg: number, g: any) =>
+        sg +
+        (g.details || []).reduce((s: number, d: any) => s + sumDetail(d), 0),
+      0
+    );
+    return acc + fromDirect + fromGroups;
+  }, 0);
 
+  const ppnAmount = Math.round(subtotalAll * (N(est.ppn, 0) / 100));
+  const grandTotal = subtotalAll + ppnAmount;
   // =========================
   // AHSP Section (opsional)
   // =========================
@@ -565,7 +683,7 @@ export async function buildEstimationPdf(
             },
             {},
           ],
-          ["Subtotal", { text: idr(subtotal), alignment: "right" }],
+          ["Subtotal", { text: idr(subtotalAll), alignment: "right" }],
           [`PPN (${est.ppn}%)`, { text: idr(ppnAmount), alignment: "right" }],
           [
             { text: "Grand Total", bold: true },
