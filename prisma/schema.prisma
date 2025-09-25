@@ -212,6 +212,16 @@ model SourceTag {
   @@map("source_tags")
 }
 
+model Units {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  label     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("units")
+}
+
 model MasterItem {
   id    String         @id @default(uuid())
   scope String         @default("GLOBAL")
