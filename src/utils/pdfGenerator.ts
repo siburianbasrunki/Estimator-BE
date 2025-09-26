@@ -14,7 +14,6 @@ import {
   MasterItem,
   AHSPComponentGroup,
 } from "@prisma/client";
-import { calcTotals } from "./exportHelpers";
 import { renderPdfBuffer } from "./pdf-finalize";
 
 // =========================
@@ -51,7 +50,7 @@ export type EstimationWithRelations = Estimation & {
 };
 
 // =========================
-// Helpers & styles
+/* Helpers & styles */
 // =========================
 const roman = (n: number) => {
   const map: [number, string][] = [
@@ -82,7 +81,6 @@ const idr = (n: number) =>
     maximumFractionDigits: 0,
   }).format(Number(n || 0));
 
-// Layout grid tegas untuk semua tabel (dengan zebra by default)
 const gridLayout = {
   defaultBorder: true,
   hLineWidth: (i: number, node: any) =>
@@ -101,7 +99,6 @@ const gridLayout = {
     return rowIndex % 2 === 0 ? "#F8FAFC" : undefined;
   },
 };
-// Layout tanpa zebra
 const gridLayoutNoZebra = { ...gridLayout, fillColor: undefined };
 
 export type BuildPdfOptions = {
@@ -118,6 +115,9 @@ export type BuildPdfOptions = {
   includeAhsp?: boolean;
   includeVolume?: boolean;
 };
+
+// a,b,c,...
+const toLetter = (i: number) => String.fromCharCode(97 + i);
 
 export async function buildEstimationPdf(
   est: EstimationWithRelations,
@@ -218,13 +218,11 @@ export async function buildEstimationPdf(
     ],
   ];
 
-  // Helper total semua detail (top-level & di dalam groups)
   const sumDetail = (d: any) =>
     N(d?.hargaTotal, N(d?.volume, 0) * N(d?.hargaSatuan, 0));
 
-  // rakit rows per-section
   est.items.forEach((section, sIdx) => {
-    // Header Section
+    // Header Section (Roman)
     rabBody.push([
       {
         text: `${roman(sIdx + 1)}    ${(section.title || "-").toUpperCase()}`,
@@ -250,33 +248,34 @@ export async function buildEstimationPdf(
         title: string;
         details: any[];
       }>;
+      let groupNo = 1;
 
-      groups.forEach((g, gIdx) => {
-        // Header Group
+      groups.forEach((g) => {
+        // Judul group: "1 Nama Group" (tidak bold)
         rabBody.push([
           {
-            text: `${roman(sIdx + 1)}.${gIdx + 1}    ${g.title || "-"}`,
-            colSpan: 6,
-            bold: true,
+            text: String(groupNo++),
+            alignment: "center",
             fillColor: "#F8FAFC",
           },
-          {},
-          {},
-          {},
-          {},
-          {},
+          { text: g.title || "-", fillColor: "#F8FAFC" }, // <= tidak bold
+          { text: "" },
+          { text: "" },
+          { text: "" },
+          { text: "" },
         ]);
 
+        // Isi group: a., b., c. di kolom Uraian (kolom No dikosongkan)
+        let letterIdx = 0;
         let groupSubtotal = 0;
-        let no = 1;
 
         (g.details || []).forEach((d) => {
           const jumlah = sumDetail(d);
           groupSubtotal += jumlah;
 
           rabBody.push([
-            { text: String(no++), alignment: "center" },
-            d.deskripsi || "-",
+            { text: "", alignment: "center" },
+            { text: `${toLetter(letterIdx++)}. ${d.deskripsi || "-"}` },
             d.satuan || "-",
             String(N(d.volume, 0)),
             { text: idr(N(d.hargaSatuan, 0)), alignment: "right" },
@@ -284,25 +283,12 @@ export async function buildEstimationPdf(
           ]);
         });
 
-        // Subtotal Group
-        rabBody.push([
-          { text: "", colSpan: 4 },
-          {},
-          {},
-          {},
-          {
-            text: `Jumlah ${roman(sIdx + 1)}.${gIdx + 1}`,
-            bold: true,
-            alignment: "right",
-          },
-          { text: idr(groupSubtotal), bold: true, alignment: "right" },
-        ]);
-
+        // ⛔ Tidak ada subtotal per group — hanya akumulasi ke section
         sectionSubtotal += groupSubtotal;
       });
     }
 
-    // Detail langsung (format lama / mix)
+    // Detail langsung (jika ada)
     if ((section.details || []).length > 0) {
       let no = 1;
       let directSubtotal = 0;
@@ -319,26 +305,11 @@ export async function buildEstimationPdf(
         ]);
       });
 
-      if (hasGroups) {
-        // bila kombinasi groups + direct details, tampilkan subtotal untuk direct details
-        rabBody.push([
-          { text: "", colSpan: 4 },
-          {},
-          {},
-          {},
-          {
-            text: `Jumlah ${roman(sIdx + 1)}.D`,
-            bold: true,
-            alignment: "right",
-          },
-          { text: idr(directSubtotal), bold: true, alignment: "right" },
-        ]);
-      }
-
+      // ⛔ Tidak ada subtotal khusus direct details
       sectionSubtotal += directSubtotal;
     }
 
-    // Subtotal Section
+    // Subtotal Section/Kategori saja
     rabBody.push([
       { text: "", colSpan: 4 },
       {},
@@ -349,7 +320,7 @@ export async function buildEstimationPdf(
     ]);
   });
 
-  // Hitung total keseluruhan dari semua detail (top-level + groups)
+  // Ringkasan total
   const subtotalAll = est.items.reduce((acc, sec) => {
     const fromDirect = (sec.details || []).reduce(
       (s, d) => s + sumDetail(d),
@@ -366,6 +337,7 @@ export async function buildEstimationPdf(
 
   const ppnAmount = Math.round(subtotalAll * (N(est.ppn, 0) / 100));
   const grandTotal = subtotalAll + ppnAmount;
+
   // =========================
   // AHSP Section (opsional)
   // =========================
@@ -380,6 +352,7 @@ export async function buildEstimationPdf(
         | null;
     }
   >();
+
   for (const it of est.items) {
     for (const d of it.details || []) {
       if (d.hspItem && !uniqHsp.has(d.hspItem.id))
@@ -389,8 +362,8 @@ export async function buildEstimationPdf(
   const blocks = [...uniqHsp.values()].sort((a, b) =>
     (a.kode || "").localeCompare(b.kode || "")
   );
-
   let idx = 1;
+
   for (const h of blocks) {
     const kode = h.kode || "";
     const desk = h.deskripsi || "-";
@@ -615,7 +588,6 @@ export async function buildEstimationPdf(
       { text: "Breakdown Volume Dipakai", style: "th" },
     ],
   ];
-
   function extrasInline(e: any[] | undefined) {
     const arr = Array.isArray(e) ? e : [];
     const pairs = arr
@@ -628,7 +600,6 @@ export async function buildEstimationPdf(
       .filter(Boolean);
     return pairs.length ? ` (${pairs.join(", ")})` : "";
   }
-
   for (const sec of est.items) {
     for (const d of sec.details || []) {
       const vols = d.volumeDetails || [];
@@ -637,11 +608,12 @@ export async function buildEstimationPdf(
 
       if (vols.length === 0) {
         const V = N(d.volume);
-        const line = `+ tanpa breakdown = ${V} ${sat}`;
-        volumeRows.push([{ text: job }, { text: line }]);
+        volumeRows.push([
+          { text: job },
+          { text: `+ tanpa breakdown = ${V} ${sat}` },
+        ]);
         continue;
       }
-
       const lines = vols.map((v) => {
         const sign = v.jenis === "SUB" ? "-" : "+";
         const P = N(v.panjang),
@@ -749,7 +721,6 @@ export async function buildEstimationPdf(
     defaultStyle: { font: "Helvetica", fontSize: 9 },
   };
 
-  // ⬇️ Render via pdf-finalize
-  const allowImages = Boolean(opts?.logo?.dataUrl); // hanya izinkan gambar kalau ada logo yang valid
+  const allowImages = Boolean(opts?.logo?.dataUrl);
   return await renderPdfBuffer(docDefinition, { allowImages });
 }
