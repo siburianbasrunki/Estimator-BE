@@ -963,6 +963,8 @@ export async function buildEstimationExcel(
       };
     }
   });
+  // tambahkan helper huruf di bagian helpers (bareng roman, N, dll.)
+  const toLetter = (i: number) => String.fromCharCode(97 + i); // a,b,c,...
 
   /** ========= Sheet 2: RAB ========= */
   const sRAB = wb.addWorksheet("RAB", {
@@ -1030,6 +1032,7 @@ export async function buildEstimationExcel(
   sRAB.getCell("A4").font = FONT.base as any;
   sRAB.getCell("A4").alignment = { horizontal: "center" };
 
+  // header 2 baris
   const h1 = sRAB.getRow(5);
   h1.values = ["No", "Uraian Pekerjaan", "Satuan", "Volume", "Harga (Rp)", ""];
   h1.eachCell((c) => {
@@ -1058,18 +1061,14 @@ export async function buildEstimationExcel(
     c.border = BORDER_THIN as any;
   });
   [1, 2, 3, 4].forEach((col) => (h2.getCell(col).border = BORDER_THIN as any));
-  //
-  let currentRow = 7;
 
-  // helper angka romawi & arab
-  const toRoman = (n: number) => roman(n);
-  const toArabic = (n: number) => String(n);
+  let currentRow = 7;
 
   est.items.forEach((section, sIdx) => {
     // ===== Header Section (Kategori) =====
     sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
     const secCell = sRAB.getCell(`A${currentRow}`);
-    secCell.value = `${toRoman(sIdx + 1)}    ${section.title?.toUpperCase?.() ?? "-"}`;
+    secCell.value = `${roman(sIdx + 1)}    ${section.title?.toUpperCase?.() ?? "-"}`;
     secCell.font = FONT.h2 as any;
     secCell.fill = {
       type: "pattern",
@@ -1095,11 +1094,11 @@ export async function buildEstimationExcel(
       }>;
 
       groups.forEach((g, gIdx) => {
-        // -- header group
+        // -- header group: "1    Nama Group" (tanpa bold, gaya sama seperti deskripsi)
         sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
         const gCell = sRAB.getCell(`A${currentRow}`);
-        gCell.value = `${toRoman(sIdx + 1)}.${toArabic(gIdx + 1)}    ${g.title || "-"}`;
-        gCell.font = { ...(FONT.base as any), bold: true };
+        gCell.value = `${gIdx + 1}    ${g.title || "-"}`;
+        gCell.font = FONT.base as any; // <= tidak bold
         gCell.fill = {
           type: "pattern",
           pattern: "solid",
@@ -1109,24 +1108,24 @@ export async function buildEstimationExcel(
         gCell.alignment = { horizontal: "left" };
         currentRow++;
 
-        let groupSubtotal = 0;
-        let rowNo = 1; // nomor di dalam group
-
-        (g.details || []).forEach((d: any) => {
+        // -- isi group: a., b., c. di kolom Uraian; kolom No dikosongkan
+        let letterIdx = 0;
+        (g.details || []).forEach((d: any, i: number) => {
           const jumlah =
             (typeof d.hargaTotal === "number" ? d.hargaTotal : undefined) ??
             Number(d.volume || 0) * Number(d.hargaSatuan || 0);
           const safeJumlah = Number.isFinite(jumlah) ? Number(jumlah) : 0;
 
           const r = sRAB.getRow(currentRow++);
-          r.getCell(1).value = rowNo++; // No
-          r.getCell(2).value = d.deskripsi || "-"; // Uraian
-          r.getCell(3).value = d.satuan || "-"; // Satuan
-          r.getCell(4).value = Number(d.volume || 0); // Volume
-          r.getCell(5).value = Number(d.hargaSatuan || 0); // Harga Satuan
-          r.getCell(6).value = safeJumlah; // Jumlah
+          r.getCell(1).value = ""; // kolom No kosong untuk baris huruf
+          r.getCell(2).value =
+            `${toLetter(letterIdx++)}. ${d.deskripsi || "-"}`;
+          r.getCell(3).value = d.satuan || "-";
+          r.getCell(4).value = Number(d.volume || 0);
+          r.getCell(5).value = Number(d.hargaSatuan || 0);
+          r.getCell(6).value = safeJumlah;
 
-          groupSubtotal += safeJumlah;
+          sectionSubtotal += safeJumlah;
 
           [1, 2, 3, 4, 5, 6].forEach(
             (c) => (r.getCell(c).border = BORDER_THIN as any)
@@ -1136,7 +1135,7 @@ export async function buildEstimationExcel(
           r.getCell(5).numFmt = NUMFMT_IDR;
           r.getCell(6).numFmt = NUMFMT_IDR;
 
-          if ((rowNo - 1) % 2 === 0) {
+          if (i % 2 === 1) {
             r.fill = {
               type: "pattern",
               pattern: "solid",
@@ -1145,41 +1144,22 @@ export async function buildEstimationExcel(
           }
         });
 
-        // -- subtotal group
-        sRAB.mergeCells(`A${currentRow}:D${currentRow}`);
-        const emptyG = sRAB.getCell(`A${currentRow}`);
-        emptyG.value = "";
-        emptyG.border = BORDER_THIN as any;
-
-        const labG = sRAB.getCell(`E${currentRow}`);
-        labG.value = `Jumlah ${toRoman(sIdx + 1)}.${toArabic(gIdx + 1)}`;
-        labG.font = { ...(FONT.base as any), bold: true };
-        labG.alignment = { horizontal: "right" };
-        labG.border = BORDER_THIN as any;
-
-        const totG = sRAB.getCell(`F${currentRow}`);
-        totG.value = groupSubtotal;
-        totG.font = { ...(FONT.base as any), bold: true };
-        totG.numFmt = NUMFMT_IDR;
-        totG.alignment = { horizontal: "right" };
-        totG.border = BORDER_THIN as any;
-
-        currentRow++;
-
-        sectionSubtotal += groupSubtotal;
+        // ⛔ Tidak ada subtotal per group — langsung lanjut
       });
-    } else {
-      // ========= FORMAT LAMA: details langsung di section =========
+    }
+
+    // ========= Detail langsung (tanpa groups) tetap bernomor 1,2,3... =========
+    if (!hasGroups && (section.details || []).length > 0) {
       let rowNo = 1;
-      (section.details || []).forEach((d) => {
+      (section.details || []).forEach((d, i) => {
         const jumlah =
           (typeof d.hargaTotal === "number" ? d.hargaTotal : undefined) ??
           Number(d.volume || 0) * Number(d.hargaSatuan || 0);
         const safeJumlah = Number.isFinite(jumlah) ? Number(jumlah) : 0;
 
         const r = sRAB.getRow(currentRow++);
-        r.getCell(1).value = rowNo++;
-        r.getCell(2).value = d.deskripsi || "-";
+        r.getCell(1).value = rowNo++; // No
+        r.getCell(2).value = d.deskripsi || "-"; // Uraian
         r.getCell(3).value = d.satuan || "-";
         r.getCell(4).value = Number(d.volume || 0);
         r.getCell(5).value = Number(d.hargaSatuan || 0);
@@ -1195,7 +1175,7 @@ export async function buildEstimationExcel(
         r.getCell(5).numFmt = NUMFMT_IDR;
         r.getCell(6).numFmt = NUMFMT_IDR;
 
-        if ((rowNo - 1) % 2 === 0) {
+        if (i % 2 === 1) {
           r.fill = {
             type: "pattern",
             pattern: "solid",
@@ -1205,14 +1185,14 @@ export async function buildEstimationExcel(
       });
     }
 
-    // ===== Subtotal Section =====
+    // ===== Subtotal Section (Kategori saja) =====
     sRAB.mergeCells(`A${currentRow}:D${currentRow}`);
     const empty = sRAB.getCell(`A${currentRow}`);
     empty.value = "";
     empty.border = BORDER_THIN as any;
 
     const lab = sRAB.getCell(`E${currentRow}`);
-    lab.value = `Jumlah ${toRoman(sIdx + 1)}`;
+    lab.value = `Jumlah ${roman(sIdx + 1)}`;
     lab.font = { ...(FONT.base as any), bold: true };
     lab.alignment = { horizontal: "right" };
     lab.border = BORDER_THIN as any;

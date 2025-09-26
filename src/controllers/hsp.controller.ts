@@ -24,22 +24,24 @@ const GROUP_LABEL: Record<GroupKey, "A" | "B" | "C" | "X"> = {
 type Role = "USER" | "ADMIN";
 
 async function getRole(req: Request): Promise<Role | undefined> {
-  const u = (req as any).user as { id?: string; role?: unknown } | undefined;
+  const anyReq = req as any;
 
-  // 1) coba dari req.user.role (bisa "admin" lowercase dll) → normalisasi
-  const roleFromReq = normalizeRole(u?.role);
+  // 1) dari req.user.role (bisa lowercase) → normalisasi
+  const roleFromReq = normalizeRole(anyReq.user?.role);
   if (roleFromReq) return roleFromReq;
 
-  // 2) fallback ke DB
-  if (u?.id) {
+  // 2) fallback lewat DB: terima user.id ATAU userId
+  const uid = anyReq.user?.id || anyReq.userId;
+  if (uid) {
     const db = await prisma.user.findUnique({
-      where: { id: u.id },
+      where: { id: uid },
       select: { role: true },
     });
     return normalizeRole(db?.role);
   }
   return undefined;
 }
+
 function userScopeOf(req: Request) {
   const anyReq = req as any;
   const uid = anyReq.user?.id || anyReq.userId;
@@ -531,9 +533,6 @@ export const listAllGrouped = async (req: Request, res: Response) => {
         where: {
           scope: userScope,
           hspCategoryId: { in: allCatIds },
-          isDeleted: false,
-          // default sembunyikan yang disabled; kalau mau expose, bisa tambah flag.
-          isDisabled: false,
           ...itemTextFilter,
         },
         select: {
@@ -554,7 +553,6 @@ export const listAllGrouped = async (req: Request, res: Response) => {
           scope: "GLOBAL",
           hspCategoryId: { in: allCatIds },
           isDeleted: false,
-          // GLOBAL tidak punya disabled semantik viewer, biarkan apa adanya
           ...itemTextFilter,
         },
         select: {
@@ -571,8 +569,6 @@ export const listAllGrouped = async (req: Request, res: Response) => {
         },
       }),
     ]);
-
-    // Dedupe per kode: pilih effective u/g SEKALI saja
     const byKodeUser = new Map(rowsUser.map((r) => [r.kode, r]));
     const byKodeGlobal = new Map(rowsGlobal.map((r) => [r.kode, r]));
     const allKode = new Set<string>([
@@ -591,7 +587,7 @@ export const listAllGrouped = async (req: Request, res: Response) => {
         hasUserOverride: boolean;
         userActive: boolean;
       };
-      hspCategoryId: string; // untuk bucketing
+      hspCategoryId: string; 
     };
 
     const effectiveByCatName: Record<string, OutItem[]> = {};
