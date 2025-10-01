@@ -3,6 +3,7 @@ import prisma from "../lib/prisma";
 import { scopeOf } from "../lib/_scoping";
 import { pickEffective } from "../lib/_override";
 import { normalizeRole } from "../lib/authz";
+import { recomputeRecipesByMasterCode } from "../lib/recompute";
 
 const toFloat = (v: any, def = 0) => {
   const n = parseFloat(String(v ?? ""));
@@ -457,9 +458,9 @@ export const updateMasterItem = async (req: Request, res: Response) => {
       where: { id },
       data: payload,
     });
-
-    if (recompute) await recomputeRecipesUsingMasterItem(id);
-
+    if (recompute) {
+      await recomputeRecipesByMasterCode(updated.code);
+    }
     res.status(200).json({
       status: "success",
       data: updated,
@@ -513,68 +514,6 @@ export const deleteMasterItem = async (req: Request, res: Response) => {
     });
   }
 };
-
-/* ============================
-   Recompute helper
-   ============================ */
-async function recomputeRecipesUsingMasterItem(masterItemId: string) {
-  const compRefs = await prisma.aHSPComponent.findMany({
-    where: { masterItemId },
-    select: { ahspId: true },
-  });
-  const ahspIds = Array.from(new Set(compRefs.map((c) => c.ahspId)));
-  if (ahspIds.length === 0) return;
-
-  const recipes = await prisma.aHSPRecipe.findMany({
-    where: { id: { in: ahspIds } },
-    include: {
-      components: {
-        include: { masterItem: true },
-        orderBy: [{ group: "asc" }, { order: "asc" }],
-      },
-      hspItem: true,
-    },
-  });
-
-  for (const recipe of recipes) {
-    let A = 0,
-      B = 0,
-      C = 0;
-    const compUpdates: any[] = [];
-
-    for (const comp of recipe.components) {
-      const effectiveUnitPrice = comp.priceOverride ?? comp.masterItem.price;
-      const subtotal = (comp.coefficient ?? 1) * effectiveUnitPrice;
-
-      compUpdates.push(
-        prisma.aHSPComponent.update({
-          where: { id: comp.id },
-          data: { effectiveUnitPrice, subtotal },
-        })
-      );
-
-      if (comp.group === "LABOR") A += subtotal;
-      if (comp.group === "MATERIAL") B += subtotal;
-      if (comp.group === "EQUIPMENT") C += subtotal;
-    }
-
-    const D = A + B + C;
-    const E = D * (recipe.overheadPercent / 100);
-    const F = D + E;
-
-    await prisma.$transaction([
-      ...compUpdates,
-      prisma.aHSPRecipe.update({
-        where: { id: recipe.id },
-        data: { subtotalABC: D, overheadAmount: E, finalUnitPrice: F },
-      }),
-      prisma.hSPItem.update({
-        where: { id: recipe.hspItem.id },
-        data: { harga: F },
-      }),
-    ]);
-  }
-}
 
 export const getMasterItemByCode = async (req: Request, res: Response) => {
   try {
@@ -702,7 +641,7 @@ export const updateMasterItemByCode = async (req: Request, res: Response) => {
         data: payload,
       });
 
-      await recomputeRecipesUsingMasterItem(updated.id);
+      await recomputeRecipesByMasterCode(updated.code);
 
       res.status(200).json({
         status: "success",
@@ -802,13 +741,12 @@ export const updateMasterItemByCode = async (req: Request, res: Response) => {
     payload.isDeleted = false;
     payload.isDisabled = false;
 
-    // Update, lalu recompute semua AHSP yang refer ke master item override ini
     const updated = await prisma.masterItem.update({
       where: { id: userItem.id },
       data: payload,
     });
 
-    await recomputeRecipesUsingMasterItem(updated.id);
+    await recomputeRecipesByMasterCode(updated.code);
 
     res.status(200).json({
       status: "success",
