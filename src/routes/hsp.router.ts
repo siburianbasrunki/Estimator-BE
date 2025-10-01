@@ -1,19 +1,13 @@
-// src/routes/hsp.routes.ts
 
 import express from "express";
 import { authenticate } from "../middleware/auth";
 import { uploadExcelCsv } from "../middleware/upload";
 import { importHSP } from "../controllers/hspImport.controller";
 import {
-  listCategories,
-  getCategoryWithItems,
   listItems,
   listAllGrouped,
   getHsdDetail,
   getHsdDetailByKode,
-  createHspCategory,
-  updateHspCategory,
-  deleteHspCategory,
   createHspItem,
   updateHspItem,
   deleteHspItem,
@@ -42,9 +36,29 @@ import {
   updateAhspComponent,
   updateAhspOverheadByKode,
 } from "../controllers/ahspRecipe.controller";
-import { importMasterLabor, importMasterMaterials } from "../controllers/masterImport.controller";
-import { createSource, deleteSource, listSources, updateSource } from "../controllers/source.controller";
-import { createUnit, deleteUnit, listUnits, updateUnit } from "../controllers/units.controller";
+import {
+  importMasterLabor,
+  importMasterMaterials,
+} from "../controllers/masterImport.controller";
+import {
+  createSource,
+  deleteSource,
+  listSources,
+  updateSource,
+} from "../controllers/source.controller";
+import {
+  createUnit,
+  deleteUnit,
+  listUnits,
+  updateUnit,
+} from "../controllers/units.controller";
+import {
+  createHspCategory,
+  deleteHspCategory,
+  getCategoryWithItems,
+  listCategories,
+  updateHspCategory,
+} from "../controllers/categories.controller";
 
 const router = express.Router();
 
@@ -53,8 +67,18 @@ router.use(express.urlencoded({ extended: true }));
 
 /** Import */
 router.post("/import", authenticate, uploadExcelCsv.single("file"), importHSP);
-router.post("/master/import/materials", authenticate, uploadExcelCsv.single("file"), importMasterMaterials);
-router.post("/master/import/labor", authenticate, uploadExcelCsv.single("file"), importMasterLabor);
+router.post(
+  "/master/import/materials",
+  authenticate,
+  uploadExcelCsv.single("file"),
+  importMasterMaterials
+);
+router.post(
+  "/master/import/labor",
+  authenticate,
+  uploadExcelCsv.single("file"),
+  importMasterLabor
+);
 /** Kategori & Items HSP */
 router.get("/categories", authenticate, listCategories);
 router.get("/categories/:id", authenticate, getCategoryWithItems);
@@ -116,8 +140,16 @@ router.patch("/recipe/components/:id", authenticate, updateAhspComponent);
 router.delete("/recipe/components/:id", authenticate, deleteAhspComponent);
 
 router.post("/items/:id/recompute", authenticate, recomputeHspItem);
-router.patch("/items/by-kode/:kode/override/active", authenticate, setHspOverrideActive);
-router.patch("/master/by-code/:code/override/active", authenticate, setMasterOverrideActive);
+router.patch(
+  "/items/by-kode/:kode/override/active",
+  authenticate,
+  setHspOverrideActive
+);
+router.patch(
+  "/master/by-code/:code/override/active",
+  authenticate,
+  setMasterOverrideActive
+);
 /** Kategori HSP (CRUD) */
 router.post("/categories", authenticate, createHspCategory);
 router.patch("/categories/:id", authenticate, updateHspCategory);
