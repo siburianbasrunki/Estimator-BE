@@ -570,7 +570,7 @@ function addSheetAHSP(wb: ExcelJS.Workbook, est: EstimationWithRelations) {
     { header: "", key: "c7", width: 18 }, // Jumlah Harga (Rp.)
   ];
 
-  addTitleBarAuto(ws, "AHSP");
+  addTitleBarAuto(ws, "AHSP (ANALISA HARGA SATUAN PEKERJAAN)");
 
   const groups: Array<{
     key: AHSPComponentGroup;

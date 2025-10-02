@@ -418,7 +418,7 @@ export const downloadAHSPPdf = async (
     const logo = await resolveLogoDataUrl(req, est.imageUrl);
 
     const pdf = await buildAhspPdf({
-      title: "AHSP Dipakai",
+      title: "AHSP (ANALISA HARGA SATUAN PEKERJAAN)",
       subtitle: `${est.projectName} • ${est.projectOwner}`,
       blocks: blocks as any,
       logo,
