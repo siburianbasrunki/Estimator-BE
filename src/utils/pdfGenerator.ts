@@ -15,6 +15,7 @@ import {
   AHSPComponentGroup,
 } from "@prisma/client";
 import { renderPdfBuffer } from "./pdf-finalize";
+import { terbilangID } from "./terbilang";
 
 // =========================
 // Types with deep include
@@ -131,12 +132,14 @@ export async function buildEstimationPdf(
   // =========================
   // Header (logo + org info)
   // =========================
+  // === Header (logo + org info) ===
   const headerNode = {
     margin: [36, 20, 36, 10],
     stack: [
       {
         table: {
-          widths: [100, "*", 220],
+          // dari [100, "*", 220] → samakan kiri & kanan supaya tengahnya simetris
+          widths: [150, "*", 150],
           body: [
             [
               opts?.logo?.dataUrl
@@ -175,22 +178,23 @@ export async function buildEstimationPdf(
     ],
   };
 
-  // =========================
-  // Info proyek
-  // =========================
-  const infoRows: [string, any][] = [
+  const baseInfo: [string, any][] = [
     ["Nama Proyek", est.projectName],
     ["Pemilik Proyek", est.projectOwner],
-    ["PPN", `${est.ppn}%`],
-    ["Status", est.status],
-    ["Dibuat", dayjs(est.createdAt).format("DD MMM YYYY HH:mm")],
-    ["Diupdate", dayjs(est.updatedAt).format("DD MMM YYYY HH:mm")],
-    ["Catatan", est.notes || "-"],
   ];
+
+  const customFieldRows: [string, any][] = (est.customFields || [])
+    .slice()
+    .sort((a, b) => (a.label || "").localeCompare(b.label || ""))
+    .map((cf) => [cf.label ?? "-", cf.value ?? ""]);
+  const infoRows: [string, any][] = [...baseInfo, ...customFieldRows];
   const infoTable = {
     table: {
       widths: ["30%", "70%"],
-      body: infoRows.map(([a, b]) => [{ text: a, bold: true }, String(b)]),
+      body: infoRows.map(([a, b]) => [
+        { text: a, bold: true },
+        String(b ?? ""),
+      ]),
     },
     layout: gridLayoutNoZebra,
     margin: [0, 10, 0, 10],
@@ -661,6 +665,10 @@ export async function buildEstimationPdf(
             { text: "Grand Total", bold: true },
             { text: idr(grandTotal), bold: true, alignment: "right" },
           ],
+          [
+          { text: "Terbilang", bold: true },
+          { text: terbilangID(grandTotal).replace(/(^|\s)\S/g, c => c), italics: true, alignment: "right" }
+        ]
         ],
         headerRows: 1,
       },
