@@ -15,7 +15,7 @@ import {
   AHSPComponentGroup,
 } from "@prisma/client";
 import { renderPdfBuffer } from "./pdf-finalize";
-import { terbilangID } from "./terbilang";
+import { terbilangIDPdf } from "./terbilang";
 
 // =========================
 // Types with deep include
@@ -207,12 +207,14 @@ export async function buildEstimationPdf(
     [
       { text: "No", style: "th", rowSpan: 2 },
       { text: "Uraian Pekerjaan", style: "th", rowSpan: 2 },
+      { text: "Kode", style: "th", rowSpan: 2 },
       { text: "Satuan", style: "th", rowSpan: 2 },
       { text: "Volume", style: "th", rowSpan: 2 },
       { text: "Harga (Rp)", style: "th", colSpan: 2 },
       {},
     ],
     [
+      "",
       "",
       "",
       "",
@@ -224,16 +226,18 @@ export async function buildEstimationPdf(
 
   const sumDetail = (d: any) =>
     N(d?.hargaTotal, N(d?.volume, 0) * N(d?.hargaSatuan, 0));
+  const getKode = (d: any) => (d?.kode ?? d?.hspItem?.kode ?? "") as string;
 
   est.items.forEach((section, sIdx) => {
     // Header Section (Roman)
     rabBody.push([
       {
         text: `${roman(sIdx + 1)}    ${(section.title || "-").toUpperCase()}`,
-        colSpan: 6,
+        colSpan: 7,
         bold: true,
         fillColor: "#E0F2FE",
       },
+      {},
       {},
       {},
       {},
@@ -267,6 +271,7 @@ export async function buildEstimationPdf(
           { text: "" },
           { text: "" },
           { text: "" },
+          { text: "" },
         ]);
 
         // Isi group: a., b., c. di kolom Uraian (kolom No dikosongkan)
@@ -280,6 +285,7 @@ export async function buildEstimationPdf(
           rabBody.push([
             { text: "", alignment: "center" },
             { text: `${toLetter(letterIdx++)}. ${d.deskripsi || "-"}` },
+            { text: getKode(d) },
             d.satuan || "-",
             String(N(d.volume, 0)),
             { text: idr(N(d.hargaSatuan, 0)), alignment: "right" },
@@ -302,6 +308,7 @@ export async function buildEstimationPdf(
         rabBody.push([
           { text: String(no++), alignment: "center" },
           d.deskripsi || "-",
+          { text: getKode(d) },
           d.satuan || "-",
           String(N(d.volume, 0)),
           { text: idr(N(d.hargaSatuan, 0)), alignment: "right" },
@@ -315,7 +322,8 @@ export async function buildEstimationPdf(
 
     // Subtotal Section/Kategori saja
     rabBody.push([
-      { text: "", colSpan: 4 },
+      { text: "", colSpan: 5 },
+      {},
       {},
       {},
       {},
@@ -641,7 +649,7 @@ export async function buildEstimationPdf(
     {
       table: {
         headerRows: 2,
-        widths: [25, "*", 50, 50, 80, 90],
+        widths: [25, "*", 90, 50, 50, 80, 90],
         body: rabBody,
       },
       layout: gridLayout,
@@ -666,9 +674,13 @@ export async function buildEstimationPdf(
             { text: idr(grandTotal), bold: true, alignment: "right" },
           ],
           [
-          { text: "Terbilang", bold: true },
-          { text: terbilangID(grandTotal).replace(/(^|\s)\S/g, c => c), italics: true, alignment: "right" }
-        ]
+            { text: "Terbilang", bold: true },
+            {
+              text: terbilangIDPdf(grandTotal).replace(/(^|\s)\S/g, (c) => c),
+              italics: true,
+              alignment: "right",
+            },
+          ],
         ],
         headerRows: 1,
       },
