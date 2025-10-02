@@ -15,6 +15,7 @@ import {
   AHSPComponentGroup,
 } from "@prisma/client";
 import { renderPdfBuffer } from "./pdf-finalize";
+import { terbilangIDPdf } from "./terbilang";
 
 // =========================
 // Types with deep include
@@ -131,12 +132,14 @@ export async function buildEstimationPdf(
   // =========================
   // Header (logo + org info)
   // =========================
+  // === Header (logo + org info) ===
   const headerNode = {
     margin: [36, 20, 36, 10],
     stack: [
       {
         table: {
-          widths: [100, "*", 220],
+          // dari [100, "*", 220] → samakan kiri & kanan supaya tengahnya simetris
+          widths: [150, "*", 150],
           body: [
             [
               opts?.logo?.dataUrl
@@ -175,22 +178,23 @@ export async function buildEstimationPdf(
     ],
   };
 
-  // =========================
-  // Info proyek
-  // =========================
-  const infoRows: [string, any][] = [
+  const baseInfo: [string, any][] = [
     ["Nama Proyek", est.projectName],
     ["Pemilik Proyek", est.projectOwner],
-    ["PPN", `${est.ppn}%`],
-    ["Status", est.status],
-    ["Dibuat", dayjs(est.createdAt).format("DD MMM YYYY HH:mm")],
-    ["Diupdate", dayjs(est.updatedAt).format("DD MMM YYYY HH:mm")],
-    ["Catatan", est.notes || "-"],
   ];
+
+  const customFieldRows: [string, any][] = (est.customFields || [])
+    .slice()
+    .sort((a, b) => (a.label || "").localeCompare(b.label || ""))
+    .map((cf) => [cf.label ?? "-", cf.value ?? ""]);
+  const infoRows: [string, any][] = [...baseInfo, ...customFieldRows];
   const infoTable = {
     table: {
       widths: ["30%", "70%"],
-      body: infoRows.map(([a, b]) => [{ text: a, bold: true }, String(b)]),
+      body: infoRows.map(([a, b]) => [
+        { text: a, bold: true },
+        String(b ?? ""),
+      ]),
     },
     layout: gridLayoutNoZebra,
     margin: [0, 10, 0, 10],
@@ -203,12 +207,14 @@ export async function buildEstimationPdf(
     [
       { text: "No", style: "th", rowSpan: 2 },
       { text: "Uraian Pekerjaan", style: "th", rowSpan: 2 },
+      { text: "Kode", style: "th", rowSpan: 2 },
       { text: "Satuan", style: "th", rowSpan: 2 },
       { text: "Volume", style: "th", rowSpan: 2 },
       { text: "Harga (Rp)", style: "th", colSpan: 2 },
       {},
     ],
     [
+      "",
       "",
       "",
       "",
@@ -220,16 +226,18 @@ export async function buildEstimationPdf(
 
   const sumDetail = (d: any) =>
     N(d?.hargaTotal, N(d?.volume, 0) * N(d?.hargaSatuan, 0));
+  const getKode = (d: any) => (d?.kode ?? d?.hspItem?.kode ?? "") as string;
 
   est.items.forEach((section, sIdx) => {
     // Header Section (Roman)
     rabBody.push([
       {
         text: `${roman(sIdx + 1)}    ${(section.title || "-").toUpperCase()}`,
-        colSpan: 6,
+        colSpan: 7,
         bold: true,
         fillColor: "#E0F2FE",
       },
+      {},
       {},
       {},
       {},
@@ -263,6 +271,7 @@ export async function buildEstimationPdf(
           { text: "" },
           { text: "" },
           { text: "" },
+          { text: "" },
         ]);
 
         // Isi group: a., b., c. di kolom Uraian (kolom No dikosongkan)
@@ -276,6 +285,7 @@ export async function buildEstimationPdf(
           rabBody.push([
             { text: "", alignment: "center" },
             { text: `${toLetter(letterIdx++)}. ${d.deskripsi || "-"}` },
+            { text: getKode(d) },
             d.satuan || "-",
             String(N(d.volume, 0)),
             { text: idr(N(d.hargaSatuan, 0)), alignment: "right" },
@@ -298,6 +308,7 @@ export async function buildEstimationPdf(
         rabBody.push([
           { text: String(no++), alignment: "center" },
           d.deskripsi || "-",
+          { text: getKode(d) },
           d.satuan || "-",
           String(N(d.volume, 0)),
           { text: idr(N(d.hargaSatuan, 0)), alignment: "right" },
@@ -311,7 +322,8 @@ export async function buildEstimationPdf(
 
     // Subtotal Section/Kategori saja
     rabBody.push([
-      { text: "", colSpan: 4 },
+      { text: "", colSpan: 5 },
+      {},
       {},
       {},
       {},
@@ -637,7 +649,7 @@ export async function buildEstimationPdf(
     {
       table: {
         headerRows: 2,
-        widths: [25, "*", 50, 50, 80, 90],
+        widths: [25, "*", 90, 50, 50, 80, 90],
         body: rabBody,
       },
       layout: gridLayout,
@@ -660,6 +672,14 @@ export async function buildEstimationPdf(
           [
             { text: "Grand Total", bold: true },
             { text: idr(grandTotal), bold: true, alignment: "right" },
+          ],
+          [
+            { text: "Terbilang", bold: true },
+            {
+              text: terbilangIDPdf(grandTotal).replace(/(^|\s)\S/g, (c) => c),
+              italics: true,
+              alignment: "right",
+            },
           ],
         ],
         headerRows: 1,

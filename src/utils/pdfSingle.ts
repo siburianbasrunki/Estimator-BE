@@ -145,7 +145,7 @@ export async function buildTablePdf(opts: BuildTablePdfOpts): Promise<Buffer> {
 
   const headerTitle = {
     table: {
-      widths: [100, "*", 220],
+      widths: [150, "*", 150],
       body: [
         [
           safeLogo
