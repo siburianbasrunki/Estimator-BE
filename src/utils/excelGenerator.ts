@@ -1045,9 +1045,11 @@ export async function buildEstimationExcel(
     properties: { defaultRowHeight: 18 },
   });
 
+  // Kolom: tambah "Kode" setelah Uraian
   sRAB.columns = [
     { header: "No", key: "no", width: 6 },
     { header: "Uraian Pekerjaan", key: "uraian", width: 56 },
+    { header: "Kode", key: "kode", width: 16 },
     { header: "Satuan", key: "satuan", width: 10 },
     { header: "Volume", key: "volume", width: 12 },
     {
@@ -1064,6 +1066,7 @@ export async function buildEstimationExcel(
     },
   ];
 
+  // Header dengan/logo: perluas hingga kolom G
   if (opts?.logo) {
     const scale = 0.7;
     const small = {
@@ -1076,28 +1079,39 @@ export async function buildEstimationExcel(
       "Rencana Anggaran Biaya",
       opts.logo,
       small,
-      "F"
+      "G"
     );
   } else {
-    addTitleBarAuto(sRAB, "Rencana Anggaran Biaya", 6);
+    addTitleBarAuto(sRAB, "Rencana Anggaran Biaya", 7);
   }
 
-  sRAB.mergeCells("A2", "F2");
+  // Info baris 2–3 (merge ke G)
+  sRAB.mergeCells("A2", "G2");
   sRAB.getCell("A2").value = `Nama Proyek: ${est.projectName}`;
   sRAB.getCell("A2").font = FONT.base as any;
   sRAB.getCell("A2").alignment = { horizontal: "center" };
+
   const cfPairs = (est.customFields || []).map(
     (cf) => `${cf.label}: ${cf.value}`
   );
   const cfLine = cfPairs.join("  •  ");
 
-  sRAB.mergeCells("A3", "F3");
+  sRAB.mergeCells("A3", "G3");
   sRAB.getCell("A3").value = cfLine || `Pemilik Proyek: ${est.projectOwner}`;
   sRAB.getCell("A3").font = FONT.base as any;
   sRAB.getCell("A3").alignment = { horizontal: "center", wrapText: true };
-  // header 2 baris
+
+  // Header tabel 2 baris
   const h1 = sRAB.getRow(5);
-  h1.values = ["No", "Uraian Pekerjaan", "Satuan", "Volume", "Harga (Rp)", ""];
+  h1.values = [
+    "No",
+    "Uraian Pekerjaan",
+    "Kode",
+    "Satuan",
+    "Volume",
+    "Harga (Rp)",
+    "",
+  ];
   h1.eachCell((c) => {
     c.font = FONT.header as any;
     c.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
@@ -1108,11 +1122,11 @@ export async function buildEstimationExcel(
     };
     c.border = BORDER_THIN as any;
   });
-  sRAB.mergeCells("E5:F5");
+  sRAB.mergeCells("F5:G5");
 
   const h2 = sRAB.getRow(6);
-  h2.values = ["", "", "", "", "Satuan (Rp)", "Jumlah (Rp)"];
-  [5, 6].forEach((col) => {
+  h2.values = ["", "", "", "", "", "Satuan (Rp)", "Jumlah (Rp)"];
+  [6, 7].forEach((col) => {
     const c = h2.getCell(col);
     c.font = FONT.header as any;
     c.alignment = { vertical: "middle", horizontal: "center" };
@@ -1123,13 +1137,17 @@ export async function buildEstimationExcel(
     };
     c.border = BORDER_THIN as any;
   });
-  [1, 2, 3, 4].forEach((col) => (h2.getCell(col).border = BORDER_THIN as any));
+  [1, 2, 3, 4, 5].forEach(
+    (col) => (h2.getCell(col).border = BORDER_THIN as any)
+  );
 
   let currentRow = 7;
 
+  // Helper penomoran huruf a., b., c.
+
   est.items.forEach((section, sIdx) => {
     // ===== Header Section (Kategori) =====
-    sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
+    sRAB.mergeCells(`A${currentRow}:G${currentRow}`);
     const secCell = sRAB.getCell(`A${currentRow}`);
     secCell.value = `${roman(sIdx + 1)}    ${section.title?.toUpperCase?.() ?? "-"}`;
     secCell.font = FONT.h2 as any;
@@ -1157,11 +1175,11 @@ export async function buildEstimationExcel(
       }>;
 
       groups.forEach((g, gIdx) => {
-        // -- header group: "1    Nama Group" (tanpa bold, gaya sama seperti deskripsi)
-        sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
+        // -- header group: "1    Nama Group"
+        sRAB.mergeCells(`A${currentRow}:G${currentRow}`);
         const gCell = sRAB.getCell(`A${currentRow}`);
         gCell.value = `${gIdx + 1}    ${g.title || "-"}`;
-        gCell.font = FONT.base as any; // <= tidak bold
+        gCell.font = FONT.base as any;
         gCell.fill = {
           type: "pattern",
           pattern: "solid",
@@ -1180,23 +1198,24 @@ export async function buildEstimationExcel(
           const safeJumlah = Number.isFinite(jumlah) ? Number(jumlah) : 0;
 
           const r = sRAB.getRow(currentRow++);
-          r.getCell(1).value = ""; // kolom No kosong untuk baris huruf
+          r.getCell(1).value = ""; // kolom No kosong (huruf)
           r.getCell(2).value =
-            `${toLetter(letterIdx++)}. ${d.deskripsi || "-"}`;
-          r.getCell(3).value = d.satuan || "-";
-          r.getCell(4).value = Number(d.volume || 0);
-          r.getCell(5).value = Number(d.hargaSatuan || 0);
-          r.getCell(6).value = safeJumlah;
+            `${toLetter(letterIdx++)}. ${d.deskripsi || "-"}`; // Uraian
+          r.getCell(3).value = d.hspItem?.kode || d.kode || ""; // Kode
+          r.getCell(4).value = d.satuan || "-";
+          r.getCell(5).value = Number(d.volume || 0);
+          r.getCell(6).value = Number(d.hargaSatuan || 0);
+          r.getCell(7).value = safeJumlah;
 
           sectionSubtotal += safeJumlah;
 
-          [1, 2, 3, 4, 5, 6].forEach(
+          [1, 2, 3, 4, 5, 6, 7].forEach(
             (c) => (r.getCell(c).border = BORDER_THIN as any)
           );
           r.getCell(2).alignment = { wrapText: true };
-          r.getCell(4).alignment = { horizontal: "right" };
-          r.getCell(5).numFmt = NUMFMT_IDR;
+          r.getCell(5).alignment = { horizontal: "right" };
           r.getCell(6).numFmt = NUMFMT_IDR;
+          r.getCell(7).numFmt = NUMFMT_IDR;
 
           if (i % 2 === 1) {
             r.fill = {
@@ -1211,7 +1230,7 @@ export async function buildEstimationExcel(
       });
     }
 
-    // ========= Detail langsung (tanpa groups) tetap bernomor 1,2,3... =========
+    // ========= Detail langsung (tanpa groups) bernomor 1,2,3... =========
     if (!hasGroups && (section.details || []).length > 0) {
       let rowNo = 1;
       (section.details || []).forEach((d, i) => {
@@ -1223,20 +1242,21 @@ export async function buildEstimationExcel(
         const r = sRAB.getRow(currentRow++);
         r.getCell(1).value = rowNo++; // No
         r.getCell(2).value = d.deskripsi || "-"; // Uraian
-        r.getCell(3).value = d.satuan || "-";
-        r.getCell(4).value = Number(d.volume || 0);
-        r.getCell(5).value = Number(d.hargaSatuan || 0);
-        r.getCell(6).value = safeJumlah;
+        r.getCell(3).value = d.hspItem?.kode || d.kode || ""; // Kode
+        r.getCell(4).value = d.satuan || "-";
+        r.getCell(5).value = Number(d.volume || 0);
+        r.getCell(6).value = Number(d.hargaSatuan || 0);
+        r.getCell(7).value = safeJumlah;
 
         sectionSubtotal += safeJumlah;
 
-        [1, 2, 3, 4, 5, 6].forEach(
+        [1, 2, 3, 4, 5, 6, 7].forEach(
           (c) => (r.getCell(c).border = BORDER_THIN as any)
         );
         r.getCell(2).alignment = { wrapText: true };
-        r.getCell(4).alignment = { horizontal: "right" };
-        r.getCell(5).numFmt = NUMFMT_IDR;
+        r.getCell(5).alignment = { horizontal: "right" };
         r.getCell(6).numFmt = NUMFMT_IDR;
+        r.getCell(7).numFmt = NUMFMT_IDR;
 
         if (i % 2 === 1) {
           r.fill = {
@@ -1248,19 +1268,19 @@ export async function buildEstimationExcel(
       });
     }
 
-    // ===== Subtotal Section (Kategori saja) =====
-    sRAB.mergeCells(`A${currentRow}:D${currentRow}`);
+    // ===== Subtotal Section (Kategori) =====
+    sRAB.mergeCells(`A${currentRow}:E${currentRow}`);
     const empty = sRAB.getCell(`A${currentRow}`);
     empty.value = "";
     empty.border = BORDER_THIN as any;
 
-    const lab = sRAB.getCell(`E${currentRow}`);
+    const lab = sRAB.getCell(`F${currentRow}`);
     lab.value = `Jumlah ${roman(sIdx + 1)}`;
     lab.font = { ...(FONT.base as any), bold: true };
     lab.alignment = { horizontal: "right" };
     lab.border = BORDER_THIN as any;
 
-    const totCell = sRAB.getCell(`F${currentRow}`);
+    const totCell = sRAB.getCell(`G${currentRow}`);
     totCell.value = sectionSubtotal;
     totCell.font = { ...(FONT.base as any), bold: true };
     totCell.numFmt = NUMFMT_IDR;
@@ -1274,14 +1294,14 @@ export async function buildEstimationExcel(
   currentRow++;
 
   // Subtotal
-  sRAB.mergeCells(`A${currentRow}:E${currentRow}`);
+  sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
   const subLab = sRAB.getCell(`A${currentRow}`);
   subLab.value = "Subtotal";
   subLab.border = BORDER_THIN as any;
   subLab.font = { ...(FONT.base as any), bold: true };
 
   {
-    const c = sRAB.getCell(`F${currentRow}`);
+    const c = sRAB.getCell(`G${currentRow}`);
     c.value = subtotal || 0;
     c.numFmt = NUMFMT_IDR;
     c.alignment = { horizontal: "right" };
@@ -1291,14 +1311,14 @@ export async function buildEstimationExcel(
   currentRow++;
 
   // PPN (x%)
-  sRAB.mergeCells(`A${currentRow}:E${currentRow}`);
+  sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
   const ppnLab = sRAB.getCell(`A${currentRow}`);
   ppnLab.value = `PPN (${est.ppn}%)`;
   ppnLab.border = BORDER_THIN as any;
   ppnLab.font = { ...(FONT.base as any), bold: true };
 
   {
-    const c = sRAB.getCell(`F${currentRow}`);
+    const c = sRAB.getCell(`G${currentRow}`);
     c.value = ppnAmount || 0;
     c.numFmt = NUMFMT_IDR;
     c.alignment = { horizontal: "right" };
@@ -1307,14 +1327,14 @@ export async function buildEstimationExcel(
   }
   currentRow++;
 
-  // Grand Total (bold)
-  sRAB.mergeCells(`A${currentRow}:E${currentRow}`);
+  // Grand Total
+  sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
   const gtLab = sRAB.getCell(`A${currentRow}`);
   gtLab.value = "Grand Total";
   gtLab.border = BORDER_THIN as any;
   gtLab.font = { ...(FONT.base as any), bold: true };
 
-  const gtCell = sRAB.getCell(`F${currentRow}`);
+  const gtCell = sRAB.getCell(`G${currentRow}`);
   gtCell.value = grandTotal || 0;
   gtCell.numFmt = NUMFMT_IDR;
   gtCell.alignment = { horizontal: "right" };
@@ -1323,7 +1343,7 @@ export async function buildEstimationExcel(
   currentRow++;
 
   // Terbilang
-  sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
+  sRAB.mergeCells(`A${currentRow}:G${currentRow}`);
   const tbTitle = sRAB.getCell(`A${currentRow}`);
   tbTitle.value = "Terbilang";
   tbTitle.font = { ...(FONT.base as any), bold: true };
@@ -1331,13 +1351,12 @@ export async function buildEstimationExcel(
   tbTitle.border = BORDER_THIN as any;
   currentRow++;
 
-  sRAB.mergeCells(`A${currentRow}:F${currentRow}`);
+  sRAB.mergeCells(`A${currentRow}:G${currentRow}`);
   const tbText = sRAB.getCell(`A${currentRow}`);
   tbText.value = terbilangIDExcel(grandTotal || 0);
   tbText.font = { ...(FONT.base as any), italic: true };
   tbText.alignment = { horizontal: "left", wrapText: true };
   tbText.border = BORDER_THIN as any;
-  // sRAB.getRow(currentRow).height = 30;
   currentRow++;
 
   /** ========= Sheets lain ========= */
