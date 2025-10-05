@@ -41,7 +41,15 @@ async function getRole(req: Request): Promise<Role | undefined> {
   }
   return undefined;
 }
-
+async function getActiveSourceMap(): Promise<Map<string, string>> {
+  const rows = await prisma.sourceTag.findMany({
+    where: { isActive: true },
+    select: { code: true, label: true },
+  });
+  const m = new Map<string, string>();
+  rows.forEach((r) => m.set(r.code, r.label));
+  return m;
+}
 function userScopeOf(req: Request) {
   const anyReq = req as any;
   const uid = anyReq.user?.id || anyReq.userId;
@@ -173,7 +181,6 @@ function chooseEffective(
   };
 }
 
-
 /** =========================
  *  ITEMS LIST + GROUPED
  *  ========================= */
@@ -244,7 +251,7 @@ export const listItems = async (req: Request, res: Response) => {
       isDeleted: true,
       isDisabled: true,
       category: { select: { id: true, name: true } },
-      source: true,
+      source: true, // code disimpan di kolom ini
     } as const;
 
     const [rowsUser, rowsGlobal] = await Promise.all([
@@ -259,13 +266,24 @@ export const listItems = async (req: Request, res: Response) => {
       .map((kode) => {
         const { chosen, meta } = chooseEffective(
           viewerRole,
-          byKodeUser.get(kode),
-          byKodeGlobal.get(kode)
+          byKodeUser.get(kode) as any,
+          byKodeGlobal.get(kode) as any
         );
         return chosen ? { ...chosen, meta } : null;
       })
       .filter(Boolean) as any[];
 
+    // Tambahkan sourceCode & sourceLabel
+    const sourceMap = await getActiveSourceMap();
+    data = data.map((it: any) => {
+      const sourceCode = it.source ?? null;
+      const sourceLabel = sourceCode
+        ? sourceMap.get(sourceCode) || sourceCode
+        : null;
+      return { ...it, sourceCode, sourceLabel };
+    });
+
+    // Sort
     data.sort((a, b) => {
       const dir = orderDir === "desc" ? -1 : 1;
       if (orderByField === "harga") return (a.harga - b.harga) * dir;
@@ -286,7 +304,6 @@ export const listItems = async (req: Request, res: Response) => {
     });
   }
 };
-
 export const listAllGrouped = async (req: Request, res: Response) => {
   try {
     const viewerRole = await getRole(req);
@@ -337,8 +354,6 @@ export const listAllGrouped = async (req: Request, res: Response) => {
     }
 
     // Index kategori
-    const byNameUser = new Map(catsUser.map((c) => [c.name, c]));
-    const byNameGlobal = new Map(catsGlobal.map((c) => [c.name, c]));
     const categoryNames = Array.from(
       new Set<string>([
         ...catsGlobal.map((c) => c.name),
@@ -365,6 +380,19 @@ export const listAllGrouped = async (req: Request, res: Response) => {
         }
       : {};
 
+    const selectItem = {
+      id: true,
+      scope: true,
+      kode: true,
+      deskripsi: true,
+      satuan: true,
+      harga: true,
+      isDeleted: true,
+      isDisabled: true,
+      hspCategoryId: true,
+      source: true,
+    } as const;
+
     const [rowsUser, rowsGlobal] = await Promise.all([
       prisma.hSPItem.findMany({
         where: {
@@ -372,18 +400,7 @@ export const listAllGrouped = async (req: Request, res: Response) => {
           hspCategoryId: { in: allCatIds },
           ...itemTextFilter,
         },
-        select: {
-          id: true,
-          scope: true,
-          kode: true,
-          deskripsi: true,
-          satuan: true,
-          harga: true,
-          isDeleted: true,
-          isDisabled: true,
-          hspCategoryId: true,
-          source: true,
-        },
+        select: selectItem,
       }),
       prisma.hSPItem.findMany({
         where: {
@@ -392,20 +409,10 @@ export const listAllGrouped = async (req: Request, res: Response) => {
           isDeleted: false,
           ...itemTextFilter,
         },
-        select: {
-          id: true,
-          scope: true,
-          kode: true,
-          deskripsi: true,
-          satuan: true,
-          harga: true,
-          isDeleted: true,
-          isDisabled: true,
-          hspCategoryId: true,
-          source: true,
-        },
+        select: selectItem,
       }),
     ]);
+
     const byKodeUser = new Map(rowsUser.map((r) => [r.kode, r]));
     const byKodeGlobal = new Map(rowsGlobal.map((r) => [r.kode, r]));
     const allKode = new Set<string>([
@@ -418,7 +425,8 @@ export const listAllGrouped = async (req: Request, res: Response) => {
       deskripsi: string;
       satuan: string;
       harga: number;
-      source: string | null;
+      sourceCode: string | null;
+      sourceLabel: string | null;
       meta: {
         source: "USER" | "ADMIN";
         hasUserOverride: boolean;
@@ -430,22 +438,29 @@ export const listAllGrouped = async (req: Request, res: Response) => {
     const effectiveByCatName: Record<string, OutItem[]> = {};
     for (const name of categoryNames) effectiveByCatName[name] = [];
 
+    const sourceMap = await getActiveSourceMap();
+
     for (const kode of allKode) {
       const u = byKodeUser.get(kode);
       const g = byKodeGlobal.get(kode);
       const { chosen, meta } = chooseEffective(viewerRole, u as any, g as any);
-
       if (!chosen) continue; // tombstone case
 
       const catName = catIdToName.get(chosen.hspCategoryId);
       if (!catName) continue; // kategori di luar akses viewer
+
+      const sourceCode = chosen.source ?? null;
+      const sourceLabel = sourceCode
+        ? sourceMap.get(sourceCode) || sourceCode
+        : null;
 
       effectiveByCatName[catName].push({
         kode: chosen.kode,
         deskripsi: chosen.deskripsi,
         satuan: chosen.satuan,
         harga: chosen.harga,
-        source: chosen.source ?? null,
+        sourceCode,
+        sourceLabel,
         meta,
         hspCategoryId: chosen.hspCategoryId,
       });
@@ -522,7 +537,7 @@ export const getHsdDetail = async (req: Request, res: Response) => {
       hspCategoryId: true,
       isDeleted: true,
       isDisabled: true,
-      source: true,
+      source: true, // code
       category: { select: { id: true, name: true } },
       ahsp: {
         include: {
@@ -632,6 +647,13 @@ export const getHsdDetail = async (req: Request, res: Response) => {
     const E = D * (overheadPercent / 100);
     const F = D + E;
 
+    // source code -> label
+    const sourceMap = await getActiveSourceMap();
+    const sourceCode = chosen.source ?? null;
+    const sourceLabel = sourceCode
+      ? sourceMap.get(sourceCode) || sourceCode
+      : null;
+
     const payload = {
       id: chosen.id,
       scope: chosen.scope,
@@ -640,6 +662,8 @@ export const getHsdDetail = async (req: Request, res: Response) => {
       satuan: chosen.satuan,
       category: chosen.category,
       harga: chosen.harga,
+      sourceCode,
+      sourceLabel,
       recipe: recipe
         ? {
             id: recipe.id,
@@ -703,7 +727,7 @@ export const getHsdDetailByKode = async (
       hspCategoryId: true,
       isDeleted: true,
       isDisabled: true,
-      source: true,
+      source: true, // code
       category: { select: { id: true, name: true } },
       ahsp: {
         include: {
@@ -844,6 +868,12 @@ export const getHsdDetailByKode = async (
     const E = D * (overheadPercent / 100);
     const F = D + E;
 
+    const sourceMap = await getActiveSourceMap();
+    const sourceCode = chosen.source ?? null;
+    const sourceLabel = sourceCode
+      ? sourceMap.get(sourceCode) || sourceCode
+      : null;
+
     const payload = {
       id: chosen.id,
       scope: chosen.scope,
@@ -852,6 +882,8 @@ export const getHsdDetailByKode = async (
       satuan: chosen.satuan,
       category: chosen.category,
       harga: chosen.harga,
+      sourceCode,
+      sourceLabel,
       recipe: recipe
         ? {
             id: recipe.id,
@@ -912,10 +944,19 @@ export const createHspItem = async (req: Request, res: Response) => {
     const deskripsiTrim = String(deskripsi).trim();
     const satuanTrim = String(satuan || "").trim();
     const s = String(sourceRaw || "").trim();
-    let sourceTag: string | null = null;
+    let sourceCode: string | null = null;
     if (s) {
-      const allowed = await getActiveSourceCodes();
-      if (allowed.has(s.toLowerCase())) sourceTag = s;
+      const tag = await prisma.sourceTag.findFirst({
+        where: {
+          isActive: true,
+          OR: [
+            { code: { equals: s, mode: "insensitive" } },
+            { label: { equals: s, mode: "insensitive" } },
+          ],
+        },
+        select: { code: true },
+      });
+      if (tag) sourceCode = tag.code; // SIMPAN CODE
     }
     if (role === "ADMIN") {
       // Cek HANYA di GLOBAL untuk item
@@ -941,7 +982,7 @@ export const createHspItem = async (req: Request, res: Response) => {
             harga: 0,
             isDeleted: false,
             isDisabled: false,
-            source: sourceTag,
+            source: sourceCode,
           },
           select: {
             id: true,
@@ -989,7 +1030,7 @@ export const createHspItem = async (req: Request, res: Response) => {
           harga: 0,
           isDeleted: false,
           isDisabled: false,
-          source: sourceTag,
+          source: sourceCode,
         },
         select: {
           id: true,
@@ -1037,7 +1078,7 @@ export const createHspItem = async (req: Request, res: Response) => {
         harga: 0,
         isDeleted: false,
         isDisabled: false,
-        source: sourceTag,
+        source: sourceCode,
       },
       select: {
         id: true,
@@ -1092,8 +1133,17 @@ export const updateHspItem = async (req: Request, res: Response) => {
       payload.satuan = req.body.satuan.trim();
     if (typeof req.body?.source === "string") {
       const s = req.body.source.trim();
-      const allowed = await getActiveSourceCodes();
-      (payload as any).source = allowed.has(s.toLowerCase()) ? s : null;
+      const tag = await prisma.sourceTag.findFirst({
+        where: {
+          isActive: true,
+          OR: [
+            { code: { equals: s, mode: "insensitive" } },
+            { label: { equals: s, mode: "insensitive" } },
+          ],
+        },
+        select: { code: true },
+      });
+      (payload as any).source = tag ? tag.code : null;
     }
 
     const current = await prisma.hSPItem.findUnique({
@@ -1223,7 +1273,7 @@ export const deleteHspItem = async (req: Request, res: Response) => {
   }
 };
 
-/** PATCH /hsp/items/by-kode/:kode (copy-on-write + activate override) */
+/** PATCH /hsp/items/by-kode/:kode (copy-on-write + activate override, with fallback if no GLOBAL) */
 export const updateHspItemByKode = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.id as string | undefined;
@@ -1234,23 +1284,25 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
     const role = await getRole(req);
     const userScope = scopeOf(userId);
 
+    // pastikan :kode sudah di-URL-encode di client
     const kode = decodeURIComponent(String(req.params.kode || "").trim());
     if (!kode) {
       res.status(400).json({ status: "error", error: "Missing kode" });
       return;
     }
 
-    // ADMIN dapat memilih: override=1 untuk tetap bikin override.
+    // ADMIN dapat memaksa override
     const forceOverride =
       String(req.query.override || "0").toLowerCase() === "1" ||
       String(req.body?.override || "0").toLowerCase() === "1";
 
+    // normalisasi payload
     const raw: {
       hspCategoryId?: string;
       kode?: string;
       deskripsi?: string;
       satuan?: string;
-      source?: string | null;
+      source?: string | null; // will become CODE or null
     } = {};
     if (typeof req.body?.hspCategoryId === "string")
       raw.hspCategoryId = req.body.hspCategoryId;
@@ -1261,15 +1313,29 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
       raw.satuan = req.body.satuan.trim();
     if (typeof req.body?.source === "string") {
       const s = req.body.source.trim();
-      const allowed = await getActiveSourceCodes();
-      raw.source = allowed.has(s.toLowerCase()) ? s : null;
+      const tag = await prisma.sourceTag.findFirst({
+        where: {
+          isActive: true,
+          OR: [
+            { code: { equals: s, mode: "insensitive" } },
+            { label: { equals: s, mode: "insensitive" } },
+          ],
+        },
+        select: { code: true },
+      });
+      raw.source = tag ? tag.code : null; // SIMPAN CODE
     }
 
-    // ==== CABANG ADMIN (default: update GLOBAL, bukan override) ====
+    /**
+     * ===========================================
+     * CABANG 1: ADMIN update GLOBAL (bukan override)
+     * ===========================================
+     */
     if (role === "ADMIN" && !forceOverride) {
       const global = await prisma.hSPItem.findUnique({
         where: { scope_kode_unique: { scope: "GLOBAL", kode } },
       });
+
       if (!global) {
         res
           .status(404)
@@ -1277,7 +1343,7 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
         return;
       }
 
-      // Pastikan categoryId yang dikirim di-resolve ke scope GLOBAL
+      // Pastikan category target berada di scope GLOBAL
       let targetCategoryId: string | undefined;
       if (raw.hspCategoryId) {
         targetCategoryId = await resolveCategoryIdForScope(
@@ -1311,7 +1377,8 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
         },
       });
 
-      // Hapus/disable override ADMIN (kalau ada) supaya tidak mengalahkan GLOBAL
+      // Nonaktifkan override ADMIN untuk kode lama (jika ada),
+      // supaya GLOBAL yang baru tidak "ketiban" override.
       const adminOverride = await prisma.hSPItem
         .findUnique({
           where: { scope_kode_unique: { scope: userScope, kode } },
@@ -1320,7 +1387,6 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
         .catch(() => null);
 
       if (adminOverride) {
-        // Aman: nonaktifkan override (atau bisa juga hard delete, pilih salah satu).
         await prisma.hSPItem.update({
           where: { id: adminOverride.id },
           data: { isDisabled: true, isDeleted: false },
@@ -1336,36 +1402,48 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
       return;
     }
 
-    // ==== CABANG OVERRIDE (USER/ADMIN dengan override=1) ====
-    // Buat/ambil override di scope pemanggil lalu update; pastikan categoryId di-resolve ke scope caller
-    const base = await prisma.hSPItem.findUnique({
-      where: { scope_kode_unique: { scope: "GLOBAL", kode } },
-    });
-    if (!base) {
+    /**
+     * ==========================================================
+     * CABANG 2: OVERRIDE (USER, atau ADMIN dengan override=1)
+     * ==========================================================
+     * Perbaikan: fallback ke override user bila GLOBAL tidak ada.
+     */
+    const baseGlobal = await prisma.hSPItem
+      .findUnique({
+        where: { scope_kode_unique: { scope: "GLOBAL", kode } },
+      })
+      .catch(() => null);
+
+    let userItem = await prisma.hSPItem
+      .findUnique({
+        where: { scope_kode_unique: { scope: userScope, kode } },
+      })
+      .catch(() => null);
+
+    // Kalau GLOBAL tidak ada dan override juga tidak ada -> 404
+    if (!baseGlobal && !userItem) {
       res.status(404).json({ status: "error", error: "Item not found" });
       return;
     }
 
-    let userItem = await prisma.hSPItem
-      .findUnique({ where: { scope_kode_unique: { scope: userScope, kode } } })
-      .catch(() => null);
-
-    if (!userItem) {
+    // Kalau override belum ada dan GLOBAL ada -> buat override dari GLOBAL
+    if (!userItem && baseGlobal) {
       userItem = await prisma.hSPItem.create({
         data: {
           scope: userScope,
-          kode: base.kode,
-          deskripsi: base.deskripsi,
-          satuan: base.satuan,
-          harga: base.harga,
-          hspCategoryId: base.hspCategoryId, // initial follow global
+          kode: baseGlobal.kode,
+          deskripsi: baseGlobal.deskripsi,
+          satuan: baseGlobal.satuan,
+          harga: baseGlobal.harga,
+          hspCategoryId: baseGlobal.hspCategoryId, // ikuti GLOBAL dulu
           isDeleted: false,
           isDisabled: false,
-          source: base.source ?? null,
+          source: baseGlobal.source ?? null,
         },
       });
     }
 
+    // Resolve category ke scope caller (user/admin scope)
     let targetCategoryId: string | undefined;
     if (raw.hspCategoryId) {
       targetCategoryId = await resolveCategoryIdForScope(
@@ -1375,7 +1453,7 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
     }
 
     const updated = await prisma.hSPItem.update({
-      where: { id: userItem.id },
+      where: { id: userItem!.id },
       data: {
         ...(raw.kode ? { kode: raw.kode } : {}),
         ...(raw.deskripsi ? { deskripsi: raw.deskripsi } : {}),
@@ -1403,13 +1481,13 @@ export const updateHspItemByKode = async (req: Request, res: Response) => {
       status: "success",
       data: updated,
       appliedTo: userScope,
-      note:
-        role === "ADMIN"
-          ? "Admin explicitly created/updated an override (override=1). Global item is unchanged."
-          : "User override updated.",
+      note: baseGlobal
+        ? "User override updated (created from GLOBAL on first update)."
+        : "User override updated (no matching GLOBAL item for this kode).",
     });
   } catch (e: any) {
     if (e?.code === "P2002") {
+      // duplikat unik (misal rename kode bentrok di scope target)
       res.status(409).json({
         status: "error",
         error: "Kode already exists in target scope",
